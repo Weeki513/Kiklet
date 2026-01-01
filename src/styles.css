@@ -6,6 +6,10 @@
   color-scheme: light dark;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   height: 100%;

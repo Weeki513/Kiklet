@@ -27,6 +27,10 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<SettingsDto, String> {
 
 #[tauri::command]
 pub fn set_openai_api_key(state: State<'_, AppState>, api_key: String) -> Result<(), String> {
+    eprintln!(
+        "[kiklet][settings] set_openai_api_key called (len={})",
+        api_key.len()
+    );
     let trimmed = api_key.trim().to_string();
     {
         let mut s = state
@@ -34,17 +38,15 @@ pub fn set_openai_api_key(state: State<'_, AppState>, api_key: String) -> Result
             .lock()
             .map_err(|_| "settings mutex poisoned".to_string())?;
         s.openai_api_key = trimmed;
-        state
-            .settings_store
-            .save(&s)
-            .map_err(|e| {
-                eprintln!("[kiklet][settings] save failed: {e}");
-                format!("failed to save settings: {e}")
-            })?;
+        if let Err(err) = state.settings_store.save(&s) {
+            eprintln!("[kiklet][settings] save failed: {err}");
+            return Err(err.to_string());
+        }
         eprintln!(
             "[kiklet][settings] saved to {}",
             state.settings_store.path.display()
         );
+        eprintln!("[kiklet][settings] saved ok");
     }
     Ok(())
 }

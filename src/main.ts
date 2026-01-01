@@ -106,15 +106,16 @@ function setModalStatus(text: string | null) {
   els.modalStatus.textContent = text;
 }
 
-function openModal() {
-  els.modal.hidden = false;
+function openApiKeyModal(reason?: string) {
+  els.modal.removeAttribute("hidden");
   setModalError(null);
   setModalStatus(null);
-  // Avoid auto-focus stealing; user can click into it.
+  if (reason) setPanelHint(reason);
 }
 
-function closeModal() {
-  els.modal.hidden = true;
+function closeApiKeyModal() {
+  els.modal.setAttribute("hidden", "");
+  console.log("[kiklet] modal hidden=", els.modal.hasAttribute("hidden"));
   setModalError(null);
   setModalStatus(null);
 }
@@ -231,25 +232,28 @@ async function loadSettingsAndMaybePrompt() {
     isTranscribing || isRecording || !hasOpenaiApiKey || !getTranscribeTarget();
 
   if (!hasOpenaiApiKey) {
-    openModal();
-    setPanelHint("Set your OpenAI API key to transcribe.");
+    openApiKeyModal("Set your OpenAI API key to transcribe.");
   } else {
     setPanelHint("");
   }
 }
 
 async function saveApiKey() {
+  console.log("[kiklet] Save click");
   setModalError(null);
   setModalStatus(null);
 
   const candidate = els.apiKey.value.trim();
+  console.log("[kiklet] api key len:", candidate.length);
   if (!candidate) {
     setModalError("Error: API key is empty.");
     console.error("[kiklet] Save click: empty API key");
     return;
   }
-  if (!candidate.startsWith("sk-")) {
-    console.warn("[kiklet] Save click: apiKey does not start with sk-");
+  if (!(candidate.startsWith("sk-") || candidate.startsWith("sk-proj-"))) {
+    setModalError("Error: API key must start with sk- (or sk-proj-).");
+    console.error("[kiklet] Save click: invalid apiKey prefix");
+    return;
   }
 
   try {
@@ -257,15 +261,14 @@ async function saveApiKey() {
     els.btnCloseModal.disabled = true;
     setModalStatus("Saving…");
 
-    console.log("[kiklet] Save click");
-
     // Deterministic mapping: Tauri default arg case is camelCase, so Rust `api_key` expects `apiKey`.
     await invoke("set_openai_api_key", { apiKey: candidate });
 
     setModalStatus("Saved.");
+    await new Promise((r) => setTimeout(r, 450));
+    console.log("[kiklet] closing modal");
+    closeApiKeyModal();
     await loadSettingsAndMaybePrompt();
-    // Close after we’ve refreshed state so UI enables Transcribe.
-    closeModal();
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     setModalError(`Error: ${msg}`);
@@ -278,10 +281,31 @@ async function saveApiKey() {
 }
 
 function wireApiKeyModal() {
+  if (els.modal.dataset.wired === "1") return;
+  els.modal.dataset.wired = "1";
   console.log("[kiklet] wireApiKeyModal ok");
+
+  // Ensure we don't accidentally double-wire on HMR: replace nodes to drop any prior listeners.
+  const saveClone = els.btnSaveKey.cloneNode(true) as HTMLButtonElement;
+  els.btnSaveKey.replaceWith(saveClone);
+  els.btnSaveKey = saveClone;
+
+  const closeClone = els.btnCloseModal.cloneNode(true) as HTMLButtonElement;
+  els.btnCloseModal.replaceWith(closeClone);
+  els.btnCloseModal = closeClone;
+
+  const settingsClone = els.btnSettings.cloneNode(true) as HTMLButtonElement;
+  els.btnSettings.replaceWith(settingsClone);
+  els.btnSettings = settingsClone;
+
   els.btnSaveKey.addEventListener("click", saveApiKey);
-  els.btnCloseModal.addEventListener("click", closeModal);
-  els.btnSettings.addEventListener("click", openModal);
+  els.btnCloseModal.addEventListener("click", () => {
+    console.log("[kiklet] close click");
+    closeApiKeyModal();
+  });
+  els.btnSettings.addEventListener("click", () => {
+    openApiKeyModal();
+  });
 }
 
 async function transcribe() {
