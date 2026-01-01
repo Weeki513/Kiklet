@@ -170,6 +170,30 @@ fn fallback_hotkey() -> &'static str {
     }
 }
 
+/// Command to resize HUD window (for auto-sizing based on content)
+#[tauri::command]
+fn resize_hud_window(app: AppHandle, width: f64, height: f64) -> Result<bool, String> {
+    use tauri::Manager;
+    
+    const MIN_WIDTH: f64 = 40.0;
+    const MIN_HEIGHT: f64 = 20.0;
+    const MAX_WIDTH: f64 = 2000.0;
+    const MAX_HEIGHT: f64 = 1000.0;
+    
+    let clamped_width = width.max(MIN_WIDTH).min(MAX_WIDTH);
+    let clamped_height = height.max(MIN_HEIGHT).min(MAX_HEIGHT);
+    
+    if let Some(hud_w) = app.get_webview_window(crate::hud::HUD_WINDOW_LABEL) {
+        let _ = hud_w.set_size(tauri::Size::Logical(tauri::LogicalSize {
+            width: clamped_width,
+            height: clamped_height,
+        }));
+        Ok(true)
+    } else {
+        Err("HUD window not found".to_string())
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -192,7 +216,8 @@ pub fn run() {
                     let _ = hud_w.set_always_on_top(true);
                     let _ = hud_w.set_skip_taskbar(true);
                     let _ = hud_w.set_resizable(false);
-                    let _ = hud_w.set_size(tauri::Size::Physical(tauri::PhysicalSize { width: 360, height: 140 }));
+                    // Initial minimal size - will be auto-resized based on content
+                    let _ = hud_w.set_size(tauri::Size::Logical(tauri::LogicalSize { width: 1.0, height: 1.0 }));
                     let _ = hud_w.hide();
 
                     // Click-through + all spaces (best-effort; macOS-only methods may not exist on other OS).
@@ -200,6 +225,120 @@ pub fn run() {
                     #[cfg(target_os = "macos")]
                     {
                         let _ = hud_w.set_visible_on_all_workspaces(true);
+                        
+                        // Make HUD window fully transparent and add neon pink border (native macOS level)
+                        use tauri::Manager;
+                        if let Ok(ns_window) = hud_w.ns_window() {
+                            unsafe {
+                                use objc::{msg_send, sel, sel_impl};
+                                use objc::runtime::Object;
+                                
+                                let window_ptr = ns_window as *mut Object;
+                                
+                                // Make window background transparent
+                                let opaque: bool = false;
+                                let _: () = msg_send![window_ptr, setOpaque: opaque];
+                                
+                                let ns_color_class = objc::runtime::Class::get("NSColor").unwrap();
+                                let clear_color: *mut Object = msg_send![ns_color_class, clearColor];
+                                let _: () = msg_send![window_ptr, setBackgroundColor: clear_color];
+                                
+                                // Disable window shadow
+                                let has_shadow: bool = false;
+                                let _: () = msg_send![window_ptr, setHasShadow: has_shadow];
+                                
+                                // Get content view and make it transparent
+                                let content_view: *mut Object = msg_send![window_ptr, contentView];
+                                if !content_view.is_null() {
+                                    // Enable layer backing for the content view
+                                    let _: () = msg_send![content_view, setWantsLayer: true];
+                                    
+                                    // Get the layer and make it transparent
+                                    let layer: *mut Object = msg_send![content_view, layer];
+                                    if !layer.is_null() {
+                                        // Set content view layer background to clear
+                                        let clear_cg_color: *mut Object = msg_send![clear_color, CGColor];
+                                        let _: () = msg_send![layer, setBackgroundColor: clear_cg_color];
+                                        
+                                        // Create neon pink color (#ff00ff = RGB 255, 0, 255) for border
+                                        let red: f64 = 1.0;   // 255/255
+                                        let green: f64 = 0.0; // 0/255
+                                        let blue: f64 = 1.0;  // 255/255
+                                        let alpha: f64 = 1.0; // fully opaque
+                                        let neon_pink_color: *mut Object = msg_send![ns_color_class, colorWithRed: red green: green blue: blue alpha: alpha];
+                                        
+                                        // Get CGColor from NSColor for the layer border
+                                        let cg_color: *mut Object = msg_send![neon_pink_color, CGColor];
+                                        
+                                        // Set border width (2px)
+                                        let border_width: f64 = 0.0;
+                                        let _: () = msg_send![layer, setBorderWidth: border_width];
+                                        
+                                        // Set border color
+                                        let _: () = msg_send![layer, setBorderColor: cg_color];
+                                    }
+                                    
+                                    // Find WKWebView recursively and make it transparent
+                                    let wk_webview_class = objc::runtime::Class::get("WKWebView");
+                                    if let Some(wk_class) = wk_webview_class {
+                                        // Helper function to find WKWebView recursively
+                                        fn find_webview(view: *mut Object, target_class: &objc::runtime::Class) -> Option<*mut Object> {
+                                            unsafe {
+                                                use objc::{msg_send, sel, sel_impl};
+                                                use objc::runtime::Object;
+                                                
+                                                // Check if this view is WKWebView (using isKindOfClass)
+                                                let is_kind: bool = msg_send![view, isKindOfClass: target_class];
+                                                if is_kind {
+                                                    return Some(view);
+                                                }
+                                                
+                                                // Check subviews recursively
+                                                let subviews: *mut Object = msg_send![view, subviews];
+                                                if !subviews.is_null() {
+                                                    let ns_array: &Object = &*(subviews as *const Object);
+                                                    let count: usize = msg_send![ns_array, count];
+                                                    for i in 0..count {
+                                                        let subview: *mut Object = msg_send![ns_array, objectAtIndex: i];
+                                                        if let Some(found) = find_webview(subview, target_class) {
+                                                            return Some(found);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            None
+                                        }
+                                        
+                                        if let Some(webview) = find_webview(content_view, &wk_class) {
+                                            // Set drawsBackground = false via KVC
+                                            let ns_string_class = objc::runtime::Class::get("NSString").unwrap();
+                                            let key_cstr = b"drawsBackground\0";
+                                            let key_str: *mut Object = msg_send![ns_string_class, stringWithUTF8String: key_cstr.as_ptr()];
+                                            // Use setValue:forKey: with NSNumber for boolean
+                                            let ns_number_class = objc::runtime::Class::get("NSNumber").unwrap();
+                                            let false_number: *mut Object = msg_send![ns_number_class, numberWithBool: false];
+                                            let _: () = msg_send![webview, setValue: false_number forKey: key_str];
+                                            
+                                            // Set opaque = false
+                                            let webview_opaque: bool = false;
+                                            let _: () = msg_send![webview, setOpaque: webview_opaque];
+                                            
+                                            // Get webview's layer and make it transparent
+                                            let _: () = msg_send![webview, setWantsLayer: true];
+                                            let webview_layer: *mut Object = msg_send![webview, layer];
+                                            if !webview_layer.is_null() {
+                                                let clear_cg_color: *mut Object = msg_send![clear_color, CGColor];
+                                                let _: () = msg_send![webview_layer, setBackgroundColor: clear_cg_color];
+                                            }
+                                            
+                                            eprintln!("[kiklet][hud] WKWebView background disabled");
+                                        }
+                                    }
+                                }
+                                
+                                eprintln!("[kiklet][hud] HUD window: fully transparent (NSWindow + contentView + WKWebView) + neon pink border");
+                            }
+                        }
                     }
                 } else {
                     eprintln!("[kiklet][hud] failed to create hud window");
@@ -341,6 +480,7 @@ pub fn run() {
             commands::debug_ping,
             commands::hud_activate,
             commands::hud_deactivate,
+            resize_hud_window,
             #[cfg(debug_assertions)]
             commands::debug_print_recordings_paths,
         ])

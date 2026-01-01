@@ -219,6 +219,32 @@ function hudPosition() {
   els.cursorHud.style.top = `${Math.round(lastMouseY + HUD_OFFSET_Y)}px`;
 }
 
+async function hudResize() {
+  if (!IS_HUD_WINDOW || !hudVisible) return;
+  
+  // Measure the actual content size of .cursor-hud-row
+  const hudRow = els.cursorHud.querySelector(".cursor-hud-row") as HTMLElement;
+  if (!hudRow) return;
+  
+  // Get bounding rect (returns CSS pixels / logical units)
+  const rect = hudRow.getBoundingClientRect();
+  
+  // Add padding around content (12px on each side for safety)
+  const padding = 12;
+  const contentWidth = rect.width + padding * 2;
+  const contentHeight = rect.height + padding * 2;
+  
+  // getBoundingClientRect() returns logical pixels (CSS px)
+  // Tauri LogicalSize expects logical units, so pass directly
+  try {
+    await invoke("resize_hud_window", { width: contentWidth, height: contentHeight });
+    // Update position after resize (clamp depends on window size)
+    hudPosition();
+  } catch (err) {
+    console.error("[kiklet][hud] resize failed:", err);
+  }
+}
+
 function hudShow(
   phase: CursorHudPhase,
   opts: { text: string; ttlMs?: number; showMeters?: boolean },
@@ -237,6 +263,14 @@ function hudShow(
   hudPosition();
   els.cursorHud.classList.remove("cursor-hud-hidden");
   els.cursorHud.classList.add("cursor-hud-visible");
+
+  // Auto-resize window to fit content (after DOM update)
+  // Use requestAnimationFrame to ensure layout is complete
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      hudResize();
+    });
+  });
 
   if (opts.ttlMs && opts.ttlMs > 0) {
     hudHideTimer = window.setTimeout(() => {
