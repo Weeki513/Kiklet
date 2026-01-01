@@ -1,8 +1,86 @@
 use tauri::{AppHandle, Emitter, State};
 
 use crate::audio;
+use crate::openai;
 use crate::storage::RecordingEntry;
-use crate::{emit_recording_state, notify, set_tray_recording_state, AppState};
+use crate::{emit_recording_state, set_tray_recording_state, AppState};
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsDto {
+    pub openai_api_key: String,
+    pub has_openai_api_key: bool,
+}
+
+#[tauri::command]
+pub fn get_settings(state: State<'_, AppState>) -> Result<SettingsDto, String> {
+    let s = state
+        .settings
+        .lock()
+        .map_err(|_| "settings mutex poisoned".to_string())?
+        .clone();
+    Ok(SettingsDto {
+        has_openai_api_key: !s.openai_api_key.trim().is_empty(),
+        openai_api_key: s.openai_api_key,
+    })
+}
+
+#[tauri::command]
+pub fn set_openai_api_key(state: State<'_, AppState>, api_key: String) -> Result<(), String> {
+    let trimmed = api_key.trim().to_string();
+    {
+        let mut s = state
+            .settings
+            .lock()
+            .map_err(|_| "settings mutex poisoned".to_string())?;
+        s.openai_api_key = trimmed;
+        state
+            .settings_store
+            .save(&s)
+            .map_err(|e| {
+                eprintln!("[kiklet][settings] save failed: {e}");
+                format!("failed to save settings: {e}")
+            })?;
+        eprintln!(
+            "[kiklet][settings] saved to {}",
+            state.settings_store.path.display()
+        );
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn debug_settings_path(state: State<'_, AppState>) -> Result<String, String> {
+    Ok(state.settings_store.path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub async fn transcribe_file(state: State<'_, AppState>, path: String) -> Result<String, String> {
+    let api_key = {
+        let s = state
+            .settings
+            .lock()
+            .map_err(|_| "settings mutex poisoned".to_string())?;
+        s.openai_api_key.clone()
+    };
+
+    // Safety: avoid arbitrary file reads; require path to be inside recordings dir.
+    let recordings_dir = state.storage.recordings_dir.clone();
+    let requested = std::path::PathBuf::from(path);
+    let requested = requested
+        .canonicalize()
+        .map_err(|_| "invalid path".to_string())?;
+    let recordings_dir = recordings_dir
+        .canonicalize()
+        .map_err(|_| "recordings directory unavailable".to_string())?;
+    if !requested.starts_with(&recordings_dir) {
+        return Err("path must be inside the recordings folder".to_string());
+    }
+
+    openai::transcribe_whisper(&api_key, &requested)
+        .await
+        .map_err(|e| e.to_string())
+}
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -43,7 +121,6 @@ pub fn start_recording(app: AppHandle, state: State<'_, AppState>) -> Result<(),
         *guard = Some(active);
     }
 
-    let _ = notify(&app, "Recording started");
     let _ = set_tray_recording_state(&app, true);
     let _ = emit_recording_state(&app, true);
     Ok(())
@@ -84,7 +161,6 @@ pub fn stop_recording(app: AppHandle, state: State<'_, AppState>) -> Result<Reco
             .map_err(|e| format!("failed to save index: {e}"))?;
     }
 
-    let _ = notify(&app, "Recording stopped");
     let _ = set_tray_recording_state(&app, false);
     let _ = emit_recording_state(&app, false);
 

@@ -1,19 +1,22 @@
 mod audio;
 mod commands;
+mod openai;
+mod settings;
 mod storage;
 
 use std::sync::Mutex;
 
 use tauri::{AppHandle, Emitter, Manager, Runtime, WindowEvent};
-use tauri_plugin_notification::NotificationExt;
-
 use crate::storage::{RecordingEntry, Storage};
+use crate::settings::{Settings, SettingsStore};
 
 const MAIN_WINDOW_LABEL: &str = "main";
 const TRAY_ID: &str = "kiklet-tray";
 
 pub struct AppState {
     pub storage: Storage,
+    pub settings_store: SettingsStore,
+    pub settings: Mutex<Settings>,
     pub recordings: Mutex<Vec<RecordingEntry>>,
     pub active_recording: Mutex<Option<audio::RecordingSession>>,
 }
@@ -22,14 +25,6 @@ fn debug_log(msg: &str) {
     if cfg!(debug_assertions) {
         eprintln!("[kiklet] {msg}");
     }
-}
-
-pub fn notify(app: &AppHandle, body: &str) -> Result<(), tauri_plugin_notification::Error> {
-    app.notification()
-        .builder()
-        .title("Kiklet")
-        .body(body)
-        .show()
 }
 
 pub fn emit_recording_state(app: &AppHandle, is_recording: bool) -> Result<(), tauri::Error> {
@@ -143,22 +138,17 @@ fn setup_hotkey(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
 
     app.global_shortcut()
         .on_shortcut("Command+Shift+Space", |app_handle, _shortcut, event| {
-            if event.state != ShortcutState::Pressed {
-                return;
-            }
-
+            // Hold-to-talk:
+            // - Pressed: start recording
+            // - Released: stop recording
             let state = app_handle.state::<AppState>();
-            let is_recording = state
-                .active_recording
-                .lock()
-                .ok()
-                .map(|g| g.is_some())
-                .unwrap_or(false);
-
-            if is_recording {
-                let _ = crate::commands::stop_recording(app_handle.clone(), state);
-            } else {
-                let _ = crate::commands::start_recording(app_handle.clone(), state);
+            match event.state {
+                ShortcutState::Pressed => {
+                    let _ = crate::commands::start_recording(app_handle.clone(), state);
+                }
+                ShortcutState::Released => {
+                    let _ = crate::commands::stop_recording(app_handle.clone(), state);
+                }
             }
         })?;
 
@@ -169,14 +159,17 @@ fn setup_hotkey(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             let storage = Storage::new(app.handle())?;
             let recordings = storage.load_or_rebuild_index()?;
+            let settings_store = SettingsStore::new(app.handle())?;
+            let settings = settings_store.load()?;
 
             app.manage(AppState {
                 storage,
+                settings_store,
+                settings: Mutex::new(settings),
                 recordings: Mutex::new(recordings),
                 active_recording: Mutex::new(None),
             });
@@ -189,6 +182,10 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::get_settings,
+            commands::set_openai_api_key,
+            commands::debug_settings_path,
+            commands::transcribe_file,
             commands::start_recording,
             commands::stop_recording,
             commands::list_recordings,

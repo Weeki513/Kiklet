@@ -13,7 +13,7 @@
       <header class="topbar">
         <div class="brand">
           <div class="title">Kiklet</div>
-          <div class="subtitle">Tiny recorder</div>
+          <div class="subtitle">Local voice-to-text</div>
         </div>
         <div class="status" id="status">Idle</div>
       </header>
@@ -21,7 +21,18 @@
       <section class="controls">
         <button class="btn" id="btn-start" type="button">Start</button>
         <button class="btn" id="btn-stop" type="button">Stop</button>
+        <button class="btn" id="btn-transcribe" type="button">Transcribe</button>
+        <button class="btn" id="btn-copy" type="button">Copy result</button>
         <button class="btn btn-secondary" id="btn-folder" type="button">Reveal Folder</button>
+        <button class="btn btn-secondary" id="btn-settings" type="button">Settings</button>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <div>Transcription</div>
+          <div class="muted" id="panel-hint"></div>
+        </div>
+        <textarea id="result" class="result" spellcheck="false"></textarea>
       </section>
 
       <section class="player">
@@ -35,6 +46,22 @@
         </div>
         <div id="items" class="items"></div>
       </section>
+
+      <div class="modal" id="modal" hidden>
+        <div class="modal-card">
+          <div class="modal-title">OpenAI API key</div>
+          <div class="modal-sub">
+            Required to transcribe recordings with Whisper. Stored locally in your app data.
+          </div>
+          <input id="api-key" class="input" type="password" autocomplete="off" spellcheck="false" />
+          <div class="modal-actions">
+            <button class="btn" id="btn-save-key" type="button">Save</button>
+            <button class="btn btn-secondary" id="btn-close-modal" type="button">Close</button>
+          </div>
+          <div class="modal-status" id="modal-status" hidden></div>
+          <div class="modal-error" id="modal-error" hidden></div>
+        </div>
+      </div>
     </main>
   </body>
 </html>

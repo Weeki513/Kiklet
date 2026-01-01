@@ -56,6 +56,7 @@ body {
 .controls {
   display: flex;
   gap: 8px;
+  flex-wrap: wrap;
 }
 
 .btn {
@@ -81,6 +82,37 @@ body {
 
 .btn-secondary {
   margin-left: auto;
+}
+
+.panel {
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  overflow: hidden;
+}
+
+.panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  font-size: 13px;
+}
+
+.result {
+  width: 100%;
+  min-height: 120px;
+  max-height: 220px;
+  resize: vertical;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 .player {
@@ -170,4 +202,75 @@ audio {
 
 .linkbtn:hover {
   background: rgba(255, 255, 255, 0.1);
+}
+
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  box-sizing: border-box;
+}
+
+.modal-card {
+  width: 100%;
+  max-width: 520px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: #0f1118;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.modal-title {
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.modal-sub {
+  font-size: 12px;
+  opacity: 0.75;
+  line-height: 1.35;
+}
+
+.input {
+  width: 100%;
+  box-sizing: border-box;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.06);
+  color: inherit;
+  padding: 10px 12px;
+  outline: none;
+  font-size: 13px;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.modal-error {
+  font-size: 12px;
+  white-space: pre-wrap;
+  border-radius: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 80, 80, 0.35);
+  background: rgba(255, 80, 80, 0.08);
+}
+
+.modal-status {
+  font-size: 12px;
+  white-space: pre-wrap;
+  border-radius: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(120, 200, 120, 0.22);
+  background: rgba(120, 200, 120, 0.08);
+  opacity: 0.9;
 }

@@ -94,3 +94,11 @@ The app exposes these Tauri commands:
 - `list_recordings()`
 - `reveal_in_finder(path)`
 - `open_recordings_folder()`
+
+## How to test API key Save (manual)
+
+1) Run: `pnpm tauri dev`
+2) On first launch the “OpenAI API key” modal appears.
+3) Paste your key, click **Save** → modal shows “Saving…”, then “Saved.” and closes.
+4) Quit and re-run `pnpm tauri dev` → modal should NOT appear (key persisted).
+5) Click **Settings** → modal opens and shows the stored key (masked input).
