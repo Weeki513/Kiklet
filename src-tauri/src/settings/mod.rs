@@ -17,6 +17,12 @@ pub enum SettingsError {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub struct Settings {
+    #[serde(default)]
+    pub autostart_enabled: bool,
+    #[serde(default)]
+    pub autoinsert_enabled: bool,
+    #[serde(default)]
+    pub hotkey_accelerator: String,
     pub openai_api_key: String,
 }
 

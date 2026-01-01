@@ -10,41 +10,158 @@
 
   <body>
     <main class="app">
-      <header class="topbar">
-        <div class="brand">
-          <div class="title">Kiklet</div>
-          <div class="subtitle">Local voice-to-text</div>
+      <header class="app-header">
+        <div class="app-brand">
+          <div class="app-title">Kiklet</div>
+          <div class="app-subtitle">Lightweight local voice-to-text</div>
         </div>
-        <div class="status" id="status">Idle</div>
+        <div class="app-status" id="status">Idle</div>
       </header>
 
-      <section class="controls">
-        <button class="btn" id="btn-start" type="button">Start</button>
-        <button class="btn" id="btn-stop" type="button">Stop</button>
-        <button class="btn" id="btn-transcribe" type="button">Transcribe</button>
-        <button class="btn" id="btn-copy" type="button">Copy result</button>
-        <button class="btn btn-secondary" id="btn-folder" type="button">Reveal Folder</button>
-        <button class="btn btn-secondary" id="btn-settings" type="button">Settings</button>
-      </section>
-
-      <section class="panel">
-        <div class="panel-header">
-          <div>Transcription</div>
-          <div class="muted" id="panel-hint"></div>
+      <section class="panel" aria-label="Settings">
+        <div class="panel-head">
+          <div class="panel-title">Настройки</div>
+          <div class="panel-sub">Персональные параметры и API‑ключ</div>
         </div>
-        <textarea id="result" class="result" spellcheck="false"></textarea>
-      </section>
 
-      <section class="player">
-        <audio id="audio" controls preload="none"></audio>
-      </section>
+        <div class="settings">
+          <!-- 1) Autostart -->
+          <div class="row">
+            <div class="row-left">
+              <div class="label">Автозапуск при старте ПК</div>
+              <div class="sub">Запускать Kiklet автоматически</div>
+            </div>
+            <div class="row-right">
+              <label class="toggle">
+                <input id="toggle-autostart" type="checkbox" />
+                <span class="toggle-track" aria-hidden="true">
+                  <span class="toggle-thumb"></span>
+                </span>
+              </label>
+              <div class="inline-msg" id="autostart-msg" hidden></div>
+            </div>
+          </div>
 
-      <section class="list">
-        <div class="list-header">
-          <div>Recordings</div>
-          <div class="muted" id="count"></div>
+          <!-- 2) Auto-insert -->
+          <div class="row">
+            <div class="row-left">
+              <div class="label">Автовставка в инпут</div>
+              <div class="sub">Вставлять текст в активное поле (позже)</div>
+            </div>
+            <div class="row-right">
+              <label class="toggle">
+                <input id="toggle-autoinsert" type="checkbox" />
+                <span class="toggle-track" aria-hidden="true">
+                  <span class="toggle-thumb"></span>
+                </span>
+              </label>
+              <div class="inline-msg" id="autoinsert-msg" hidden></div>
+              <button class="chip-btn" id="btn-test-deliver" type="button" title="Test deliver_text()">Test deliver</button>
+              <button class="chip-btn" id="btn-open-permissions" type="button" title="Open OS permissions settings">Open permissions</button>
+              <button class="chip-btn" id="btn-check-permissions" type="button" title="Check OS permissions">Check permissions</button>
+              <div class="inline-msg" id="deliver-msg" hidden></div>
+              <div class="inline-msg" id="perm-msg" hidden></div>
+            </div>
+          </div>
+
+          <!-- 3) Auto-translate -->
+          <div class="row">
+            <div class="row-left">
+              <div class="label">Автоперевод</div>
+              <div class="sub">Язык вывода (позже)</div>
+            </div>
+            <div class="row-right">
+              <div class="select">
+                <select id="select-translate" title="Автоперевод">
+                  <option value="off">Выключено</option>
+                  <option value="ru">Русский</option>
+                  <option value="en">English</option>
+                </select>
+                <span class="select-chev" aria-hidden="true"></span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 4) Hotkey -->
+          <div class="row">
+            <div class="row-left">
+              <div class="label" title="Шорткат для запуска диктофона">Шорткат для запуска диктофона</div>
+              <div class="sub">Нажмите, чтобы изменить</div>
+            </div>
+            <div class="row-right">
+              <button class="field" id="field-hotkey" type="button" title="Шорткат для запуска диктофона">
+                <span class="field-value" id="hotkey-value">⌘ ⇧ Space</span>
+                <span class="icon-btn" aria-hidden="true">✎</span>
+              </button>
+              <button class="chip-btn" id="hotkey-reset" type="button" hidden title="Сбросить">Сброс</button>
+              <div class="inline-msg" id="hotkey-msg" hidden></div>
+            </div>
+          </div>
+
+          <!-- 5) OpenAI API key -->
+          <div class="row">
+            <div class="row-left">
+              <div class="label">Ваш api‑ключ OpenAI</div>
+              <div class="sub">Хранится локально в app data</div>
+            </div>
+            <div class="row-right">
+              <button class="field" id="field-apikey" type="button" title="Ваш api‑ключ OpenAI">
+                <span class="field-value mono" id="apikey-masked">sk‑••••••••••••••••••</span>
+                <span class="icon-btn" aria-hidden="true">✎</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- 6) Model -->
+          <div class="row">
+            <div class="row-left">
+              <div class="label">Выбрать модель</div>
+              <div class="sub">Для транскрипции</div>
+            </div>
+            <div class="row-right">
+              <div class="select">
+                <select id="select-model" title="Выбрать модель">
+                  <option value="whisper-1">whisper-1</option>
+                </select>
+                <span class="select-chev" aria-hidden="true"></span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 7) Tutorial -->
+          <div class="row row-tutorial">
+            <div class="row-left">
+              <div class="label">Запустить туториал</div>
+              <div class="sub">Короткий walkthrough интерфейса</div>
+            </div>
+            <div class="row-right">
+              <button class="tutorial" id="btn-tutorial" type="button">
+                <span>Запустить</span>
+                <span class="play" aria-hidden="true">▶</span>
+              </button>
+            </div>
+          </div>
         </div>
-        <div id="items" class="items"></div>
+      </section>
+
+      <section class="panel" aria-label="History">
+        <div class="panel-head panel-head-row">
+          <div>
+            <div class="panel-title">История записей</div>
+            <div class="panel-sub" id="history-sub">—</div>
+          </div>
+          <div class="panel-actions">
+            <button class="btn" id="btn-start" type="button" title="Start recording">Start</button>
+            <button class="btn" id="btn-stop" type="button" title="Stop recording">Stop</button>
+          </div>
+        </div>
+
+        <div class="list" id="history-list">
+          <div class="list-head">
+            <div class="muted" id="count"></div>
+          </div>
+          <div id="items" class="items"></div>
+        </div>
       </section>
 
       <div class="modal" id="modal" hidden>
@@ -62,6 +179,35 @@
           <div class="modal-error" id="modal-error" hidden></div>
         </div>
       </div>
+
+      <div class="modal" id="details-modal" hidden>
+        <div class="modal-card">
+          <div class="modal-title">Детали записи</div>
+          <div class="modal-sub" id="details-sub">—</div>
+          <textarea id="details-text" class="textarea" spellcheck="false" placeholder="Transcription will appear here…" readonly></textarea>
+          <div class="modal-actions">
+            <button class="btn" id="btn-details-transcribe" type="button">Transcribe</button>
+            <button class="btn btn-secondary" id="btn-details-copy" type="button">Copy</button>
+            <button class="btn" id="btn-details-reveal" type="button">Reveal</button>
+            <button class="btn btn-secondary" id="btn-details-close" type="button">Close</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal" id="delete-modal" hidden>
+        <div class="modal-card">
+          <div class="modal-title">Удалить запись?</div>
+          <div class="modal-sub" id="delete-sub">—</div>
+          <div class="modal-actions">
+            <button class="btn btn-secondary" id="btn-delete-cancel" type="button">Cancel</button>
+            <button class="btn" id="btn-delete-confirm" type="button">Delete</button>
+          </div>
+          <div class="modal-error" id="delete-error" hidden></div>
+        </div>
+      </div>
+
+      <div class="toast" id="toast" hidden></div>
+      <audio id="audio" preload="none"></audio>
     </main>
   </body>
 </html>

@@ -102,3 +102,17 @@ The app exposes these Tauri commands:
 3) Paste your key, click **Save** → modal shows “Saving…”, then “Saved.” and closes.
 4) Quit and re-run `pnpm tauri dev` → modal should NOT appear (key persisted).
 5) Click **Settings** → modal opens and shows the stored key (masked input).
+
+## How to test Autostart (manual)
+
+macOS:
+- Toggle “Автозапуск при старте ПК” ON → check plist exists in `~/Library/LaunchAgents/`
+- Verify: `launchctl print gui/$(id -u)/<BUNDLE_ID>.kiklet` (label is `<BUNDLE_ID>.kiklet`)
+- Restart app → toggle stays ON
+
+Windows:
+- Toggle ON → verify:
+  `reg query "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "Kiklet"`
+- Toggle OFF → query should fail / value missing
+- Restart app → toggle reflects actual registry state
+

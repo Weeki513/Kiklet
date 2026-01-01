@@ -1,5 +1,9 @@
 mod audio;
 mod commands;
+mod autostart;
+mod deliver;
+mod hotkey;
+mod perm;
 mod openai;
 mod settings;
 mod storage;
@@ -9,6 +13,7 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, Runtime, WindowEvent};
 use crate::storage::{RecordingEntry, Storage};
 use crate::settings::{Settings, SettingsStore};
+use crate::hotkey::HotkeyState;
 
 const MAIN_WINDOW_LABEL: &str = "main";
 const TRAY_ID: &str = "kiklet-tray";
@@ -131,28 +136,34 @@ fn setup_close_to_hide(app: &AppHandle) {
     });
 }
 
-fn setup_hotkey(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
-    // Keep idle cost at ~0: register once, no background loop.
-    use tauri_plugin_global_shortcut::GlobalShortcutExt;
-    use tauri_plugin_global_shortcut::ShortcutState;
+fn default_hotkey() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "Cmd+Shift+Space"
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "Ctrl+Shift+Space"
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        "Ctrl+Shift+Space"
+    }
+}
 
-    app.global_shortcut()
-        .on_shortcut("Command+Shift+Space", |app_handle, _shortcut, event| {
-            // Hold-to-talk:
-            // - Pressed: start recording
-            // - Released: stop recording
-            let state = app_handle.state::<AppState>();
-            match event.state {
-                ShortcutState::Pressed => {
-                    let _ = crate::commands::start_recording(app_handle.clone(), state);
-                }
-                ShortcutState::Released => {
-                    let _ = crate::commands::stop_recording(app_handle.clone(), state);
-                }
-            }
-        })?;
-
-    Ok(())
+fn fallback_hotkey() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "Cmd+Option+Space"
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "Ctrl+Alt+Space"
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        "Ctrl+Alt+Space"
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -166,6 +177,7 @@ pub fn run() {
             let settings_store = SettingsStore::new(app.handle())?;
             let settings = settings_store.load()?;
 
+            app.manage(HotkeyState::default());
             app.manage(AppState {
                 storage,
                 settings_store,
@@ -176,7 +188,47 @@ pub fn run() {
 
             setup_tray(app.handle())?;
             setup_close_to_hide(app.handle());
-            setup_hotkey(app.handle())?;
+
+            // Register hotkey from settings (or default).
+            let configured = {
+                let state = app.state::<AppState>();
+                let s = state.settings.lock().map_err(|_| "settings mutex poisoned")?;
+                if s.hotkey_accelerator.trim().is_empty() {
+                    default_hotkey().to_string()
+                } else {
+                    s.hotkey_accelerator.trim().to_string()
+                }
+            };
+
+            eprintln!("[kiklet][hotkey] register: {configured}");
+            if let Err(err) = crate::hotkey::register(app.handle(), &configured) {
+                eprintln!("[kiklet][hotkey] error: {err}");
+                let fb = fallback_hotkey();
+                eprintln!("[kiklet][hotkey] fallback register: {fb}");
+                if let Err(err2) = crate::hotkey::register(app.handle(), fb) {
+                    eprintln!("[kiklet][hotkey] error: {err2}");
+                    crate::hotkey::set_error(app.handle(), err2);
+                } else {
+                    // Save fallback as the active hotkey for consistency.
+                    {
+                        let state = app.state::<AppState>();
+                        let lock_res = state.settings.lock();
+                        if let Ok(mut s) = lock_res {
+                            s.hotkey_accelerator = fb.to_string();
+                            let _ = state.settings_store.save(&s);
+                        }
+                    }
+                }
+            } else {
+                {
+                    let state = app.state::<AppState>();
+                    let lock_res = state.settings.lock();
+                    if let Ok(mut s) = lock_res {
+                        s.hotkey_accelerator = configured;
+                        let _ = state.settings_store.save(&s);
+                    }
+                }
+            }
 
             debug_log("ready");
             Ok(())
@@ -185,7 +237,19 @@ pub fn run() {
             commands::get_settings,
             commands::set_openai_api_key,
             commands::debug_settings_path,
+            commands::get_autostart_status,
+            commands::set_autostart_enabled,
+            commands::set_autoinsert_enabled,
+            commands::deliver_text,
+            commands::open_permissions_settings,
+            commands::check_permissions,
+            commands::request_accessibility,
+            commands::get_hotkey,
+            commands::set_hotkey,
+            commands::reset_hotkey,
+            commands::hotkey_status,
             commands::transcribe_file,
+            commands::delete_recording,
             commands::start_recording,
             commands::stop_recording,
             commands::list_recordings,
