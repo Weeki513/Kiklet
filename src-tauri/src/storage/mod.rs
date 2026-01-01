@@ -3,6 +3,7 @@ use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use tauri::Manager;
+use chrono::TimeZone;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
@@ -39,6 +40,22 @@ pub struct Storage {
     pub index_path: PathBuf,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FailedDelete {
+    pub filename: String,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearAllReport {
+    pub deleted_count: usize,
+    pub files_on_disk_before: usize,
+    pub index_count_before: usize,
+    pub failed_deletes: Vec<FailedDelete>,
+}
+
 fn index_filename() -> &'static str {
     "recordings.json"
 }
@@ -53,13 +70,20 @@ fn debug_log(msg: &str) {
     }
 }
 
+/// Get the recordings directory path. This is the SINGLE SOURCE OF TRUTH for where recordings are stored.
+/// Creates the directory if it doesn't exist.
+pub fn recordings_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, StorageError> {
+    let app_data_dir = app.path().app_data_dir()?;
+    let recordings_dir = app_data_dir.join(recordings_dirname());
+    std::fs::create_dir_all(&recordings_dir)?;
+    Ok(recordings_dir)
+}
+
 impl Storage {
     pub fn new(app: &tauri::AppHandle) -> Result<Self, StorageError> {
         let app_data_dir = app.path().app_data_dir()?;
-        let recordings_dir = app_data_dir.join(recordings_dirname());
+        let recordings_dir = recordings_dir(app)?;
         let index_path = app_data_dir.join(index_filename());
-
-        std::fs::create_dir_all(&recordings_dir)?;
 
         Ok(Self {
             app_data_dir,
@@ -170,6 +194,221 @@ impl Storage {
         let frames = total_samples / channels;
         let duration_sec = frames / sample_rate;
         Ok((duration_sec, created_at))
+    }
+
+    pub fn purge_old_recordings(&self, app: &tauri::AppHandle, days: u32) -> Result<(usize, usize), StorageError> {
+        eprintln!("[kiklet][storage] purge_old_recordings START days={}", days);
+        
+        // Use SINGLE SOURCE OF TRUTH for recordings_dir
+        let recordings_dir = recordings_dir(app)?;
+        eprintln!("[kiklet][storage] recordings_dir={:?}", recordings_dir);
+        eprintln!("[kiklet][storage] recordings_json={:?}", self.index_path);
+        
+        // Load or rebuild index
+        let recordings = self.load_or_rebuild_index()?;
+        let total_count = recordings.len();
+        eprintln!("[kiklet][storage] index BEFORE: {} recordings", total_count);
+        
+        // Count actual files on disk
+        let mut files_on_disk = 0;
+        if let Ok(entries) = std::fs::read_dir(recordings_dir.as_path()) {
+            for entry in entries.flatten() {
+                if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
+                    if ext == "wav" {
+                        files_on_disk += 1;
+                    }
+                }
+            }
+        }
+        eprintln!("[kiklet][storage] files_on_disk: {} .wav files", files_on_disk);
+        
+        // Calculate cutoff time
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(days as i64);
+        eprintln!("[kiklet][storage] cutoff_time: {} (UTC)", cutoff);
+        
+        let mut deleted_count = 0;
+        let mut kept_count = 0;
+        let mut to_keep = Vec::new();
+        
+        for entry in recordings.iter() {
+            // STRICT: determine age ONLY from recordings.json "created_at".
+            // Renames/mtime must NOT affect purge.
+            let created = match chrono::DateTime::parse_from_rfc3339(&entry.created_at) {
+                Ok(dt) => dt.with_timezone(&chrono::Utc),
+                Err(_) => {
+                    // Legacy format without timezone (e.g. "2026-01-01T23:53:08"):
+                    // treat as LOCAL time and convert to UTC when possible.
+                    match chrono::NaiveDateTime::parse_from_str(&entry.created_at, "%Y-%m-%dT%H:%M:%S") {
+                        Ok(naive) => {
+                            let local_dt = chrono::Local.from_local_datetime(&naive);
+                            if let chrono::LocalResult::Single(ldt) = local_dt {
+                                eprintln!(
+                                    "[kiklet][storage] legacy created_at (no tz) for {} -> treating as LOCAL, converting to UTC",
+                                    entry.filename
+                                );
+                                ldt.with_timezone(&chrono::Utc)
+                            } else {
+                                eprintln!(
+                                    "[kiklet][storage] legacy created_at (no tz) ambiguous/invalid local time for {} -> treating as UTC",
+                                    entry.filename
+                                );
+                                naive.and_utc()
+                            }
+                        }
+                        Err(_) => {
+                            // FAIL-CLOSED: invalid created_at => delete
+                            eprintln!(
+                                "[kiklet][storage] invalid created_at '{}' for {} -> delete (fail-closed)",
+                                entry.created_at,
+                                entry.filename
+                            );
+                            chrono::DateTime::from_timestamp(0, 0)
+                                .unwrap_or_else(|| chrono::Utc::now() - chrono::Duration::days(365))
+                                .with_timezone(&chrono::Utc)
+                        }
+                    }
+                }
+            };
+            
+            if created < cutoff {
+                eprintln!("[kiklet][storage] OLD: {} (created={}, cutoff={})", entry.filename, created, cutoff);
+                // Delete WAV file
+                let wav_path = recordings_dir.join(&entry.filename);
+                eprintln!("[kiklet][storage] purge delete: {:?} exists={}", wav_path, wav_path.exists());
+                if wav_path.exists() {
+                    match std::fs::remove_file(&wav_path) {
+                        Ok(()) => {
+                            deleted_count += 1;
+                            eprintln!("[kiklet][storage] delete ok: {}", entry.filename);
+                        }
+                        Err(e) => {
+                            eprintln!("[kiklet][storage] delete failed: {} err={}", entry.filename, e);
+                            eprintln!("[kiklet][storage] removing from index anyway (fail-open for index)");
+                            deleted_count += 1;
+                        }
+                    }
+                } else {
+                    eprintln!("[kiklet][storage] missing (already gone): {}, removing from index", entry.filename);
+                    deleted_count += 1; // File missing, remove from index
+                }
+            } else {
+                kept_count += 1;
+                to_keep.push(entry.clone());
+            }
+        }
+        
+        // Save updated index
+        self.save_index(&to_keep)?;
+        eprintln!("[kiklet][storage] purge complete: deleted={}, kept={}", deleted_count, kept_count);
+        println!("[kiklet][storage] purge complete: deleted={}, kept={}", deleted_count, kept_count);
+        eprintln!("[kiklet][storage] index AFTER: {} recordings", to_keep.len());
+        
+        Ok((deleted_count, kept_count))
+    }
+
+    pub fn clear_all_recordings(&self, app: &tauri::AppHandle) -> Result<ClearAllReport, StorageError> {
+        eprintln!("[kiklet][storage] clear_all_recordings START");
+        
+        // Use SINGLE SOURCE OF TRUTH for recordings_dir
+        let recordings_dir = recordings_dir(app)?;
+        eprintln!("[kiklet][storage] recordings_dir={:?}", recordings_dir);
+        eprintln!("[kiklet][storage] recordings_json={:?}", self.index_path);
+        
+        // Load or rebuild index to get list of files
+        let recordings = self.load_or_rebuild_index()?;
+        let total_count = recordings.len();
+        eprintln!("[kiklet][storage] index BEFORE: {} recordings", total_count);
+        
+        // Also scan disk for any .wav files not in index
+        let mut files_on_disk = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(recordings_dir.as_path()) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                    if ext == "wav" {
+                        if let Some(filename) = path.file_name().and_then(|s| s.to_str()) {
+                            files_on_disk.push(filename.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "[kiklet][storage] files_on_disk_before: {} .wav files",
+            files_on_disk.len()
+        );
+        
+        let files_on_disk_before = files_on_disk.len();
+        let index_count_before = total_count;
+        let mut deleted_count = 0usize;
+        let mut failed_deletes: Vec<FailedDelete> = Vec::new();
+        
+        // Delete all WAV files from index
+        for entry in recordings.iter() {
+            let wav_path = recordings_dir.join(&entry.filename);
+            eprintln!("[kiklet][storage] attempting to delete: {:?}", wav_path);
+            if wav_path.exists() {
+                match std::fs::remove_file(&wav_path) {
+                    Ok(()) => {
+                        deleted_count += 1;
+                        eprintln!("[kiklet][storage] delete ok: {}", entry.filename);
+                    }
+                    Err(e) => {
+                        eprintln!("[kiklet][storage] delete failed: {} err={}", entry.filename, e);
+                        failed_deletes.push(FailedDelete {
+                            filename: entry.filename.clone(),
+                            error: e.to_string(),
+                        });
+                    }
+                }
+            } else {
+                eprintln!("[kiklet][storage] missing (already gone): {}", entry.filename);
+            }
+        }
+        
+        // Delete any .wav files on disk that weren't in index
+        for filename in files_on_disk.iter() {
+            if !recordings.iter().any(|e| e.filename == *filename) {
+                let wav_path = recordings_dir.join(filename);
+                eprintln!("[kiklet][storage] deleting orphaned file: {}", filename);
+                match std::fs::remove_file(&wav_path) {
+                    Ok(()) => {
+                        deleted_count += 1;
+                        eprintln!("[kiklet][storage] delete ok (orphaned): {}", filename);
+                    }
+                    Err(e) => {
+                        eprintln!("[kiklet][storage] delete failed (orphaned): {} err={}", filename, e);
+                        failed_deletes.push(FailedDelete {
+                            filename: filename.clone(),
+                            error: e.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+        
+        // Clear index
+        self.save_index(&[])?;
+        eprintln!(
+            "[kiklet][storage] clear done deleted={} failed={}",
+            deleted_count,
+            failed_deletes.len()
+        );
+        println!(
+            "[kiklet][storage] clear done deleted={} failed={}",
+            deleted_count,
+            failed_deletes.len()
+        );
+        eprintln!("[kiklet][storage] index AFTER: 0 recordings (cleared)");
+        
+        // NOTE: We do NOT fail the whole command on per-file delete errors.
+        // We return a report so the UI can show errors deterministically.
+        Ok(ClearAllReport {
+            deleted_count,
+            files_on_disk_before,
+            index_count_before,
+            failed_deletes,
+        })
     }
 }
 

@@ -46,7 +46,8 @@ fn filename_format() -> &'static [FormatItem<'static>] {
 }
 
 fn created_at_format() -> &'static [FormatItem<'static>] {
-    format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]")
+    // RFC3339 format with Z (UTC): 2026-01-01T19:53:08Z
+    format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]Z")
 }
 
 fn now_local_fallback_utc() -> time::OffsetDateTime {
@@ -93,9 +94,17 @@ impl RecordingSession {
         let stem = now
             .format(filename_format())
             .unwrap_or_else(|_| "recording".into());
-        let created_at = now
-            .format(created_at_format())
-            .unwrap_or_else(|_| "unknown".into());
+        // Always use UTC for created_at to ensure consistent parsing (RFC3339 with Z)
+        let now_utc = now.to_offset(time::UtcOffset::UTC);
+        let created_at = match now_utc.format(created_at_format()) {
+            Ok(s) => s,
+            Err(_) => {
+                // Fallback: construct RFC3339 manually
+                format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+                    now_utc.year(), now_utc.month() as u8, now_utc.day(),
+                    now_utc.hour(), now_utc.minute(), now_utc.second())
+            }
+        };
         let filename = format!("{stem}.wav");
         let path = recordings_dir.join(&filename);
 

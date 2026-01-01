@@ -23,7 +23,46 @@ pub struct Settings {
     pub autoinsert_enabled: bool,
     #[serde(default)]
     pub hotkey_accelerator: String,
+    #[serde(default)]
+    pub hotkey_kind: String, // "modifier" | "combo"
+    #[serde(default)]
+    pub hotkey_code: Option<String>, // For combo: e.g. "Digit1"
+    #[serde(default)]
+    pub hotkey_mods: Option<HotkeyMods>, // For combo
+    #[serde(default = "default_ptt_enabled")]
+    pub ptt_enabled: bool,
+    #[serde(default = "default_ptt_threshold_ms")]
+    pub ptt_threshold_ms: u64,
     pub openai_api_key: String,
+    #[serde(default)]
+    pub translate_target: Option<String>, // null = не переводить
+    #[serde(default = "default_translate_model")]
+    pub translate_model: String,
+}
+
+fn default_translate_model() -> String {
+    "gpt-4o".to_string() // Fallback, будет заменено на доступную модель при загрузке
+}
+
+fn default_ptt_enabled() -> bool {
+    false
+}
+
+fn default_ptt_threshold_ms() -> u64 {
+    300
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HotkeyMods {
+    #[serde(default)]
+    pub cmd: bool,
+    #[serde(default)]
+    pub ctrl: bool,
+    #[serde(default)]
+    pub alt: bool,
+    #[serde(default)]
+    pub shift: bool,
 }
 
 #[derive(Debug, Clone)]

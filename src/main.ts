@@ -1,5 +1,6 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { confirm } from "@tauri-apps/plugin-dialog";
 
 type RecordingItem = {
   id: string;
@@ -25,6 +26,13 @@ type SettingsDto = {
   openaiApiKey: string;
   hasOpenaiApiKey: boolean;
   autoinsertEnabled: boolean;
+  hotkeyAccelerator: string;
+  hotkeyCode?: string;
+  hotkeyMods?: { cmd: boolean; ctrl: boolean; alt: boolean; shift: boolean };
+  pttEnabled: boolean;
+  pttThresholdMs: number;
+  translateTarget?: string | null;
+  translateModel: string;
 };
 
 const els = {
@@ -40,11 +48,16 @@ const els = {
   deliverMsg: document.getElementById("deliver-msg") as HTMLDivElement,
   btnCheckPermissions: document.getElementById("btn-check-permissions") as HTMLButtonElement,
   permMsg: document.getElementById("perm-msg") as HTMLDivElement,
-  selectTranslate: document.getElementById("select-translate") as HTMLSelectElement,
+  inputTranslate: document.getElementById("input-translate") as HTMLInputElement,
+  btnTranslateClear: document.getElementById("btn-translate-clear") as HTMLButtonElement,
+  translateAutocomplete: document.getElementById("translate-autocomplete") as HTMLDivElement,
+  selectTranslateModel: document.getElementById("select-translate-model") as HTMLSelectElement,
   fieldHotkey: document.getElementById("field-hotkey") as HTMLButtonElement,
   hotkeyValue: document.getElementById("hotkey-value") as HTMLSpanElement,
   hotkeyReset: document.getElementById("hotkey-reset") as HTMLButtonElement,
   hotkeyMsg: document.getElementById("hotkey-msg") as HTMLDivElement,
+  inputPttThreshold: document.getElementById("input-ptt-threshold") as HTMLInputElement,
+  pttThresholdMsg: document.getElementById("ptt-threshold-msg") as HTMLDivElement,
   fieldApiKey: document.getElementById("field-apikey") as HTMLButtonElement,
   apiKeyMasked: document.getElementById("apikey-masked") as HTMLSpanElement,
   selectModel: document.getElementById("select-model") as HTMLSelectElement,
@@ -57,6 +70,11 @@ const els = {
   count: document.getElementById("count") as HTMLDivElement,
   items: document.getElementById("items") as HTMLDivElement,
   audio: document.getElementById("audio") as HTMLAudioElement,
+  btnClearHistory: document.getElementById("btn-clear-history") as HTMLButtonElement,
+  clearStatus: document.getElementById("clear-status") as HTMLDivElement,
+  jsError: document.getElementById("js-error") as HTMLDivElement,
+  btnDebugStorage: document.getElementById("btn-debug-storage") as HTMLButtonElement,
+  debugStorageOut: document.getElementById("debug-storage-out") as HTMLPreElement,
 
   // API key modal
   modal: document.getElementById("modal") as HTMLDivElement,
@@ -96,6 +114,14 @@ let hotkeyCaptureActive = false;
 
 let autostartBusy = false;
 let autoinsertBusy = false;
+
+// PTT state machine
+let isHotkeyHeld = false;
+let pttArmed = false;
+let pttActive = false;
+let holdMode = false; // true when hold > 300ms, false for tap
+let pttTimer: number | null = null;
+let pttThresholdMs = 300;
 
 function fmtDuration(sec: number): string {
   if (!Number.isFinite(sec) || sec < 0) return "0s";
@@ -139,6 +165,25 @@ function showToast(text: string) {
     els.toast.textContent = "";
     toastTimer = null;
   }, 1800);
+}
+
+function setClearStatus(text: string) {
+  els.clearStatus.hidden = false;
+  els.clearStatus.textContent = text;
+}
+
+function setJsError(text: string) {
+  els.jsError.hidden = false;
+  els.jsError.textContent = text;
+}
+
+function formatAnyError(e: unknown): string {
+  if (e instanceof Error) return e.stack || e.message;
+  try {
+    return JSON.stringify(e);
+  } catch {
+    return String(e);
+  }
 }
 
 function setModalError(text: string | null) {
@@ -263,11 +308,173 @@ function maskApiKey(key: string): string {
   return `${prefix}${"•".repeat(10)}${tail}`;
 }
 
+// Popular languages for autocomplete
+const POPULAR_LANGUAGES = [
+  "English", "Русский", "Español", "Français", "Deutsch", "Português", "Italiano",
+  "中文", "日本語", "한국어", "العربية", "हिन्दी", "Türkçe", "Polski", "Nederlands",
+  "Svenska", "Norsk", "Dansk", "Suomi", "Čeština", "Română", "Magyar", "Ελληνικά",
+  "Български", "Українська", "Tiếng Việt", "ไทย", "Bahasa Indonesia", "Bahasa Melayu",
+  "עברית", "فارسی", "اردو", "বাংলা", "தமிழ்", "తెలుగు", "മലയാളം", "ಕನ್ನಡ",
+  "ગુજરાતી", "ਪੰਜਾਬੀ", "मराठी", "O'zbek", "Қазақ", "Azərbaycan", "ქართული",
+  "Հայերեն", "Shqip", "Hrvatski", "Srpski", "Slovenčina", "Slovenščina", "Eesti",
+  "Latviešu", "Lietuvių", "Македонски", "Bosanski", "Монгол", "नेपाली", "සිංහල",
+  "မြန်မာ", "ខ្មែរ", "Lao", "Cebuano", "Tagalog", "Hausa", "Yorùbá", "Igbo",
+  "Zulu", "Afrikaans", "Swahili", "Amharic", "Somali", "Kinyarwanda", "Luganda",
+  "Kiswahili", "Xhosa", "Tswana", "Sesotho", "Malagasy", "Maltese", "Icelandic",
+  "Irish", "Welsh", "Breton", "Basque", "Catalan", "Galician", "Luxembourgish",
+  "Faroese", "Kurdish", "Pashto", "Dari", "Tajik", "Kyrgyz", "Turkmen", "Mongolian",
+  "Tibetan", "Nepali", "Sinhala", "Dhivehi", "Maldivian", "Chichewa"
+];
+
+function filterLanguages(query: string): string[] {
+  if (!query || query.trim() === "") return [];
+  const q = query.toLowerCase();
+  return POPULAR_LANGUAGES.filter((lang) => lang.toLowerCase().includes(q));
+}
+
+function showAutocomplete(query: string) {
+  const matches = filterLanguages(query);
+  const autocomplete = els.translateAutocomplete;
+  autocomplete.innerHTML = "";
+  
+  if (matches.length === 0) {
+    autocomplete.style.display = "none";
+    return;
+  }
+  
+  for (const lang of matches.slice(0, 10)) {
+    const item = document.createElement("div");
+    item.style.cssText = "padding: 8px 12px; cursor: pointer; border-bottom: 1px solid #eee;";
+    item.textContent = lang;
+    item.addEventListener("mouseenter", () => {
+      item.style.backgroundColor = "#f5f5f5";
+    });
+    item.addEventListener("mouseleave", () => {
+      item.style.backgroundColor = "white";
+    });
+    item.addEventListener("click", () => {
+      els.inputTranslate.value = lang;
+      autocomplete.style.display = "none";
+      els.btnTranslateClear.style.display = "block";
+      saveTranslateTarget();
+    });
+    autocomplete.appendChild(item);
+  }
+  
+  autocomplete.style.display = "block";
+}
+
+async function saveTranslateTarget() {
+  const value = els.inputTranslate.value.trim();
+  const target = value === "" || value === "Не переводить" ? null : value;
+  try {
+    await invoke("set_translate_target", { target });
+    await refreshSettings(false);
+  } catch (e) {
+    console.error("[kiklet] set_translate_target failed:", e);
+  }
+}
+
+async function loadTranslateModels(): Promise<void> {
+  try {
+    const models = (await invoke("list_models")) as string[];
+    if (models.length > 0) {
+      // Clear existing options except the first one (if it's a placeholder)
+      const select = els.selectTranslateModel;
+      const currentValue = select.value;
+      select.innerHTML = "";
+      
+      // Add models
+      for (const model of models) {
+        const option = document.createElement("option");
+        option.value = model;
+        option.textContent = model;
+        select.appendChild(option);
+      }
+      
+      // Restore previous selection if it exists
+      if (currentValue && Array.from(select.options).some((opt) => opt.value === currentValue)) {
+        select.value = currentValue;
+      } else if (models.includes("gpt-4o")) {
+        select.value = "gpt-4o";
+      } else if (models.length > 0) {
+        select.value = models[0];
+      }
+      
+      console.log(`[kiklet][ui] loaded ${models.length} translate models`);
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.warn(`[kiklet][ui] loadTranslateModels failed: ${msg}`);
+  }
+}
+
 async function refreshSettings(allowPrompt: boolean) {
   const s = (await invoke("get_settings")) as SettingsDto;
   hasOpenaiApiKey = Boolean(s.hasOpenaiApiKey);
   els.apiKeyMasked.textContent = hasOpenaiApiKey ? maskApiKey(s.openaiApiKey ?? "") : "Не задан";
   els.toggleAutoInsert.checked = Boolean(s.autoinsertEnabled);
+  pttThresholdMs = s.pttThresholdMs ?? 300;
+  els.inputPttThreshold.value = String(s.pttThresholdMs ?? 300);
+  
+  // Update translate settings
+  if (s.translateTarget && s.translateTarget.trim() !== "") {
+    els.inputTranslate.value = s.translateTarget;
+    els.btnTranslateClear.style.display = "block";
+  } else {
+    els.inputTranslate.value = "Не переводить";
+    els.btnTranslateClear.style.display = "none";
+  }
+  els.selectTranslateModel.value = s.translateModel || "gpt-4o";
+  
+  // Load models list if API key is available
+  if (hasOpenaiApiKey) {
+    loadTranslateModels().catch((e: unknown) => {
+      console.warn("[kiklet][ui] loadTranslateModels failed:", e);
+    });
+  }
+  
+  // Start PTT tracker if enabled (schedule after UI is ready, not immediately)
+  // ptt_enabled is derived from ptt_threshold_ms > 0
+  const pttEnabled = (s.pttThresholdMs ?? 0) > 0;
+  console.log("[kiklet][ptt][ui] check ptt_threshold_ms=", s.pttThresholdMs, "ptt_enabled=", pttEnabled, "hotkeyCode=", s.hotkeyCode);
+  if (pttEnabled && s.hotkeyCode && s.hotkeyMods) {
+    console.log("[kiklet][ptt][ui] schedule start");
+    // Schedule PTT start after UI is ready (not on main thread during startup)
+    setTimeout(async () => {
+      try {
+        console.log("[kiklet][ptt][ui] starting PTT tracker");
+        const started = await invoke("ptt_start", {
+          code: s.hotkeyCode,
+          mods: s.hotkeyMods,
+          accelerator: s.hotkeyAccelerator || "",
+        }) as boolean;
+        if (started) {
+          console.log("[kiklet][ptt][ui] start ok");
+        } else {
+          console.warn("[kiklet][ptt][ui] start failed (returned false)");
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (msg.includes("need_accessibility")) {
+          console.warn("[kiklet][ptt][ui] start failed err=need_accessibility");
+        } else {
+          console.error("[kiklet][ptt][ui] start failed err=", e);
+        }
+      }
+    }, 0);
+  } else {
+    // Stop PTT if disabled
+    console.log("[kiklet][ptt][ui] PTT disabled, stopping");
+    setTimeout(async () => {
+      try {
+        await invoke("ptt_stop");
+      } catch (e) {
+        console.error("[kiklet][ptt][ui] PTT stop error:", e);
+      }
+    }, 0);
+  }
+  
   if (allowPrompt && !hasOpenaiApiKey) openApiKeyModal();
 }
 
@@ -369,13 +576,13 @@ async function togglePlay(item: RecordingItem) {
 }
 
 function loadUiPrefs() {
-  els.selectTranslate.value = localStorage.getItem("kiklet.translate") ?? "off";
+  // translate is stored in settings.json (backend)
   els.selectModel.value = localStorage.getItem("kiklet.model") ?? "whisper-1";
   // hotkey is stored in settings.json (backend)
 }
 
 function saveUiPrefs() {
-  localStorage.setItem("kiklet.translate", els.selectTranslate.value);
+  // Translate settings saved via change handlers
   localStorage.setItem("kiklet.model", els.selectModel.value);
 }
 
@@ -506,21 +713,30 @@ type DeliveryResult = {
 };
 
 async function deliverAfterFinalText(text: string) {
-  if (!els.toggleAutoInsert.checked) return;
+  // Always call deliver_text - it will handle autoinsert_enabled internally
+  // Even if autoinsert is disabled, text should go to clipboard
   if (!text.trim()) return;
   try {
     const res = (await invoke("deliver_text", { text })) as DeliveryResult;
-    setAutoinsertMsg(deliveryUiLabel(res));
-    setDeliverMsg(deliveryUiLabel(res));
-    setTimeout(() => {
-      setAutoinsertMsg(null);
-      setDeliverMsg(null);
-    }, 1800);
+    const delivered = res.mode === "insert" ? "pasted" : "clipboard";
+    const reason = res.detail || "";
+    console.log(`[kiklet][ui] deliver result=${delivered} reason=${reason}`);
+    // Only show UI message if autoinsert is enabled (to avoid noise when disabled)
+    if (els.toggleAutoInsert.checked) {
+      setAutoinsertMsg(deliveryUiLabel(res));
+      setDeliverMsg(deliveryUiLabel(res));
+      setTimeout(() => {
+        setAutoinsertMsg(null);
+        setDeliverMsg(null);
+      }, 1800);
+    }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error("[kiklet] deliver_text failed:", e);
-    setAutoinsertMsg(`Failed: ${msg}`);
-    setDeliverMsg(`Failed: ${msg}`);
+    if (els.toggleAutoInsert.checked) {
+      setAutoinsertMsg(`Failed: ${msg}`);
+      setDeliverMsg(`Failed: ${msg}`);
+    }
   }
 }
 
@@ -582,10 +798,36 @@ async function maybeAutoTranscribe(
       updateDetailsTranscribeUI(transcriptionState.get(record.id));
     }
     
-    // Try deliver if autoinsert is enabled (best-effort, don't fail on error)
+    // Try translate + deliver if autoinsert is enabled (best-effort, don't fail on error)
     if (finalText) {
       try {
-        await deliverAfterFinalText(finalText);
+        let textToDeliver = finalText;
+        
+        // Check if translation is enabled
+        const settings = (await invoke("get_settings")) as SettingsDto;
+        const shouldTranslate = settings.translateTarget 
+          && settings.translateTarget.trim() !== "" 
+          && settings.translateTarget.trim().toLowerCase() !== "не переводить";
+        console.log(`[kiklet][translate] target=${settings.translateTarget || "none"} model=${settings.translateModel || "gpt-4o"} skip=${!shouldTranslate}`);
+        
+        if (shouldTranslate) {
+          try {
+            console.log(`[kiklet][ui] translate start lang=${settings.translateTarget} model=${settings.translateModel}`);
+            textToDeliver = (await invoke("translate_text", {
+              text: finalText,
+              targetLanguage: settings.translateTarget!,
+              model: settings.translateModel || "gpt-4o",
+            })) as string;
+            console.log(`[kiklet][ui] translate ok len=${textToDeliver.length}`);
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            console.warn(`[kiklet][ui] translate fail err=${msg}, using original text`);
+            // Fallback to original text on translation error
+            textToDeliver = finalText;
+          }
+        }
+        
+        await deliverAfterFinalText(textToDeliver);
       } catch (e) {
         console.warn("[kiklet] autoTranscribe deliver failed (non-fatal):", e);
       }
@@ -605,6 +847,15 @@ async function maybeAutoTranscribe(
       updateDetailsTranscribeUI(transcriptionState.get(record.id));
       showToast(`Transcribe error: ${msg}`);
     }
+  }
+}
+
+function setPttThresholdMsg(msg: string | null) {
+  if (msg) {
+    els.pttThresholdMsg.textContent = msg;
+    els.pttThresholdMsg.hidden = false;
+  } else {
+    els.pttThresholdMsg.hidden = true;
   }
 }
 
@@ -630,33 +881,42 @@ async function refreshHotkey() {
   }
 }
 
-function formatHotkey(e: KeyboardEvent): string {
-  const parts: string[] = [];
+// Check if event is a modifier key
+function isModifierKey(e: KeyboardEvent): boolean {
+  const modifierCodes = new Set([
+    "ShiftLeft", "ShiftRight",
+    "ControlLeft", "ControlRight",
+    "AltLeft", "AltRight",
+    "MetaLeft", "MetaRight",
+  ]);
+  const modifierKeys = new Set([
+    "Shift", "Control", "Alt", "Meta", "Command", "Option",
+  ]);
+  return modifierCodes.has(e.code) || modifierKeys.has(e.key);
+}
+
+// Normalize code - keep full code for backend (e.g. "KeyS", "Digit1", "ArrowLeft")
+function normalizeCode(code: string): string {
+  // Keep the full code as-is - backend will map it to plugin candidates
+  // This ensures we don't lose information (e.g. "KeyS" vs "S")
+  return code;
+}
+
+// Format modifier-only hotkey
+function formatModifierOnly(e: KeyboardEvent): string | null {
   const isMac = navigator.platform.toLowerCase().includes("mac");
   if (isMac) {
-    if (e.metaKey) parts.push("Cmd");
-    if (e.altKey) parts.push("Option");
-    if (e.shiftKey) parts.push("Shift");
-    if (e.ctrlKey) parts.push("Ctrl");
+    if (e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) return "Cmd";
+    if (e.altKey && !e.metaKey && !e.ctrlKey && !e.shiftKey) return "Option";
+    if (e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) return "Shift";
+    if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) return "Ctrl";
   } else {
-    if (e.ctrlKey) parts.push("Ctrl");
-    if (e.altKey) parts.push("Alt");
-    if (e.shiftKey) parts.push("Shift");
-    if (e.metaKey) parts.push("Win");
+    if (e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey) return "Ctrl";
+    if (e.altKey && !e.ctrlKey && !e.shiftKey && !e.metaKey) return "Alt";
+    if (e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) return "Shift";
+    if (e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) return "Win";
   }
-
-  let key: string;
-  if (e.code === "Space") key = "Space";
-  else if (e.code === "Insert") key = "Ins";
-  else if (/^F\d{1,2}$/i.test(e.key)) key = e.key.toUpperCase();
-  else if (e.key.length === 1) key = e.key.toUpperCase();
-  else key = e.key;
-
-  // Disallow modifier-only.
-  const modifierKeys = new Set(["Shift", "Control", "Alt", "Meta"]);
-  if (modifierKeys.has(e.key)) return "";
-
-  return [...parts, key].join("+");
+  return null;
 }
 
 function startHotkeyCapture() {
@@ -665,38 +925,108 @@ function startHotkeyCapture() {
   setHotkeyMsg("Listening…");
   els.hotkeyValue.textContent = "Press shortcut…";
 
+  let pendingModifier: string | null = null;
+  let hadNonModifier = false;
+
   const onKeyDown = (e: KeyboardEvent) => {
     e.preventDefault();
+    
+    // Always log
+    console.log("[kiklet][hotkey][ui] keydown", {
+      key: e.key,
+      code: e.code,
+      meta: e.metaKey,
+      ctrl: e.ctrlKey,
+      alt: e.altKey,
+      shift: e.shiftKey,
+      repeat: e.repeat,
+    });
+    
+    // Escape: cancel listening
     if (e.key === "Escape") {
+      console.log("[kiklet] hotkey listening cancelled (Escape)");
       hotkeyCaptureActive = false;
       window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("keyup", onKeyUp, true);
       setHotkeyMsg(null);
       void refreshHotkey();
       return;
     }
-    hotkeyCaptureActive = false;
-    window.removeEventListener("keydown", onKeyDown, true);
-
-    const hk = formatHotkey(e);
-    if (!hk) {
-      setHotkeyMsg("Error: invalid shortcut");
+    
+    // Backspace/Delete: clear hotkey
+    if (e.key === "Backspace" || e.key === "Delete") {
+      console.log("[kiklet] hotkey clear requested");
+      hotkeyCaptureActive = false;
+      window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("keyup", onKeyUp, true);
+      setHotkeyMsg(null);
       void refreshHotkey();
       return;
     }
+
+    // Check if this is a modifier key
+    if (isModifierKey(e)) {
+      // Track pending modifier for modifier-only detection
+      const modOnly = formatModifierOnly(e);
+      if (modOnly) {
+        pendingModifier = modOnly;
+        hadNonModifier = false;
+        els.hotkeyValue.textContent = `${modOnly}…`;
+      }
+      return; // Keep listening
+    }
+
+    // Non-modifier key: this is a combo
+    hadNonModifier = true;
+    pendingModifier = null;
+
+    const isMac = navigator.platform.toLowerCase().includes("mac");
+    const mods = {
+      cmd: isMac && e.metaKey,
+      ctrl: e.ctrlKey,
+      alt: e.altKey,
+      shift: e.shiftKey,
+    };
+    const code = normalizeCode(e.code);
+    
+    // Build accelerator string
+    const parts: string[] = [];
+    if (isMac) {
+      if (e.metaKey) parts.push("Cmd");
+      if (e.altKey) parts.push("Alt");
+      if (e.shiftKey) parts.push("Shift");
+      if (e.ctrlKey) parts.push("Ctrl");
+    } else {
+      if (e.ctrlKey) parts.push("Ctrl");
+      if (e.altKey) parts.push("Alt");
+      if (e.shiftKey) parts.push("Shift");
+      if (e.metaKey) parts.push("Win");
+    }
+    const candidate = parts.length > 0 ? `${parts.join("+")}+${code}` : code;
+
+    console.log("[kiklet][hotkey][ui] candidate", { candidate, kind: "combo", code, mods });
+    hotkeyCaptureActive = false;
+    window.removeEventListener("keydown", onKeyDown, true);
+    window.removeEventListener("keyup", onKeyUp, true);
 
     void (async () => {
       setHotkeyMsg("Saving…");
       els.fieldHotkey.disabled = true;
       els.hotkeyReset.disabled = true;
       try {
-        const saved = (await invoke("set_hotkey", { accelerator: hk })) as string;
+        const saved = (await invoke("set_hotkey", {
+          accelerator: candidate,
+          kind: "combo",
+          code: code,
+          mods: mods,
+        })) as string;
         els.hotkeyValue.textContent = saved;
         setHotkeyMsg("Saved");
         setTimeout(() => setHotkeyMsg(null), 450);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         setHotkeyMsg(`Error: ${msg}`);
-        console.error("[kiklet] set_hotkey failed:", err);
+        console.error(`[kiklet][hotkey][ui] set_hotkey failed err=${msg}`);
         void refreshHotkey();
       } finally {
         els.fieldHotkey.disabled = false;
@@ -704,7 +1034,23 @@ function startHotkeyCapture() {
       }
     })();
   };
+
+  const onKeyUp = (e: KeyboardEvent) => {
+    // Modifier-only not supported - ignore
+    if (pendingModifier && isModifierKey(e) && !hadNonModifier) {
+      // Don't commit modifier-only, just cancel
+      console.log("[kiklet][hotkey][ui] modifier-only not supported, cancelling");
+      hotkeyCaptureActive = false;
+      window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("keyup", onKeyUp, true);
+      setHotkeyMsg("Modifier-only not supported");
+      setTimeout(() => setHotkeyMsg(null), 2000);
+      void refreshHotkey();
+    }
+  };
+
   window.addEventListener("keydown", onKeyDown, true);
+  window.addEventListener("keyup", onKeyUp, true);
 }
 
 async function saveApiKey() {
@@ -780,11 +1126,82 @@ async function stop() {
 }
 
 window.addEventListener("DOMContentLoaded", async () => {
+  // Global JS error visibility (no silent failures)
+  window.addEventListener("error", (ev) => {
+    const msg = `[js-error] ${ev.message} @ ${ev.filename}:${ev.lineno}:${ev.colno}`;
+    setJsError(msg);
+    console.error(msg, (ev as any).error);
+  });
+  window.addEventListener("unhandledrejection", (ev) => {
+    const msg = `[js-unhandledrejection] ${formatAnyError((ev as PromiseRejectionEvent).reason)}`;
+    setJsError(msg);
+    console.error(msg, (ev as PromiseRejectionEvent).reason);
+  });
+
   loadUiPrefs();
 
   els.toggleAutostart.addEventListener("change", onAutostartToggle);
   els.toggleAutoInsert.addEventListener("change", onAutoInsertToggle);
-  els.selectTranslate.addEventListener("change", saveUiPrefs);
+  
+  // Translate input handlers
+  els.inputTranslate.addEventListener("focus", () => {
+    if (els.inputTranslate.value === "Не переводить") {
+      els.inputTranslate.value = "";
+    }
+  });
+  
+  els.inputTranslate.addEventListener("input", () => {
+    const value = els.inputTranslate.value;
+    if (value.trim() === "") {
+      els.translateAutocomplete.style.display = "none";
+      els.btnTranslateClear.style.display = "none";
+    } else {
+      els.btnTranslateClear.style.display = "block";
+      showAutocomplete(value);
+    }
+  });
+  
+  els.inputTranslate.addEventListener("blur", () => {
+    // Delay to allow click on autocomplete item
+    setTimeout(() => {
+      els.translateAutocomplete.style.display = "none";
+      const value = els.inputTranslate.value.trim();
+      if (value === "" || value === "Не переводить") {
+        els.inputTranslate.value = "Не переводить";
+        els.btnTranslateClear.style.display = "none";
+        saveTranslateTarget();
+      } else {
+        saveTranslateTarget();
+      }
+    }, 200);
+  });
+  
+  els.inputTranslate.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      els.inputTranslate.blur();
+    } else if (e.key === "Escape") {
+      els.translateAutocomplete.style.display = "none";
+    }
+  });
+  
+  els.btnTranslateClear.addEventListener("click", () => {
+    els.inputTranslate.value = "Не переводить";
+    els.btnTranslateClear.style.display = "none";
+    els.translateAutocomplete.style.display = "none";
+    saveTranslateTarget();
+  });
+  
+  els.selectTranslateModel.addEventListener("change", async () => {
+    const model = els.selectTranslateModel.value;
+    try {
+      await invoke("set_translate_model", { model });
+      await refreshSettings(false);
+    } catch (e) {
+      console.error("[kiklet] set_translate_model failed:", e);
+    }
+  });
+  
   els.selectModel.addEventListener("change", saveUiPrefs);
 
   els.btnTestDeliver.addEventListener("click", async () => {
@@ -843,6 +1260,70 @@ window.addEventListener("DOMContentLoaded", async () => {
   });
 
   els.fieldHotkey.addEventListener("click", startHotkeyCapture);
+  
+  // PTT threshold input handler (on blur)
+  els.inputPttThreshold.addEventListener("blur", async () => {
+    const rawValue = els.inputPttThreshold.value.trim();
+    let value = 0;
+    if (rawValue && !isNaN(Number(rawValue))) {
+      value = Math.max(0, Math.floor(Number(rawValue)));
+    }
+    
+    els.inputPttThreshold.value = String(value);
+    
+    try {
+      const updated = (await invoke("set_ptt_threshold_ms", {
+        thresholdMs: value,
+      })) as SettingsDto;
+      
+      pttThresholdMs = updated.pttThresholdMs;
+      
+      // Apply runtime behavior
+      if (value === 0) {
+        console.log("[kiklet][ptt][ui] threshold=0 -> stop");
+        try {
+          await invoke("ptt_stop");
+        } catch (e) {
+          console.error("[kiklet][ptt][ui] ptt_stop error:", e);
+        }
+      } else {
+        console.log(`[kiklet][ptt][ui] threshold=${value} -> start`);
+        if (!updated.hotkeyCode || !updated.hotkeyMods) {
+          console.log("[kiklet][ptt][ui] no hotkey -> skip start");
+        } else {
+          // Stop first to ensure idempotency
+          try {
+            await invoke("ptt_stop");
+          } catch (e) {
+            // Ignore errors on stop
+          }
+          try {
+            const started = await invoke("ptt_start", {
+              code: updated.hotkeyCode,
+              mods: updated.hotkeyMods,
+              accelerator: updated.hotkeyAccelerator || "",
+            }) as boolean;
+            if (started) {
+              console.log("[kiklet][ptt][ui] start ok");
+            }
+          } catch (e) {
+            console.error("[kiklet][ptt][ui] ptt_start error:", e);
+          }
+        }
+      }
+      
+      setPttThresholdMsg("Saved");
+      setTimeout(() => setPttThresholdMsg(null), 1000);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error("[kiklet][ptt][ui] set_ptt_threshold_ms failed:", e);
+      setPttThresholdMsg(`Error: ${msg}`);
+      setTimeout(() => setPttThresholdMsg(null), 3000);
+      // Revert to previous value
+      await refreshSettings(false);
+    }
+  });
+  
   els.hotkeyReset.addEventListener("click", () => {
     void (async () => {
       setHotkeyMsg("Saving…");
@@ -906,6 +1387,106 @@ window.addEventListener("DOMContentLoaded", async () => {
   els.btnDeleteCancel.addEventListener("click", closeDeleteModal);
   els.btnDeleteConfirm.addEventListener("click", deleteRecording);
 
+  // Clear history button
+  els.btnClearHistory.addEventListener("click", async () => {
+    const originalText = els.btnClearHistory.textContent;
+    try {
+      setClearStatus("clear: clicked");
+
+      // Visible proof that this handler runs (even without DevTools)
+      els.btnClearHistory.textContent = "CLICKED";
+      window.setTimeout(() => {
+        if (els.btnClearHistory.textContent === "CLICKED") {
+          els.btnClearHistory.textContent = originalText;
+        }
+      }, 400);
+
+      setClearStatus("clear: before-confirm");
+      console.log("[kiklet][ui] clear_all_recordings click");
+      const confirmed = await confirm("Delete all recordings? This cannot be undone.", {
+        title: "Clear history",
+        kind: "warning",
+      });
+
+      setClearStatus(`clear: confirmed=${confirmed}`);
+      if (!confirmed) return;
+
+      els.btnClearHistory.disabled = true;
+      els.btnClearHistory.textContent = "Clearing...";
+
+      setClearStatus("clear: ping...");
+      const pong = (await invoke("debug_ping")) as string;
+      setClearStatus(`clear: ping ok (${pong})`);
+
+      setClearStatus("clear: invoking clear_all_recordings");
+      const result = (await invoke("clear_all_recordings")) as {
+        deletedCount: number;
+        recordingsDir: string;
+        recordingsJson: string;
+        filesOnDiskBefore: number;
+        filesOnDiskAfter: number;
+        indexCountBefore: number;
+        indexCountAfter: number;
+        failedDeletes: Array<{ filename: string; error: string }>;
+      };
+
+      setClearStatus(
+        `clear: ok deletedCount=${result.deletedCount} failed=${result.failedDeletes?.length || 0} ` +
+          `wavBefore=${result.filesOnDiskBefore} wavAfter=${result.filesOnDiskAfter} ` +
+          `indexBefore=${result.indexCountBefore} indexAfter=${result.indexCountAfter}`,
+      );
+
+      if (result.failedDeletes && result.failedDeletes.length > 0) {
+        showToast(`Error: failedDeletes=${result.failedDeletes.length}`);
+      } else {
+        showToast(`Cleared ${result.deletedCount} recordings`);
+      }
+
+      await refreshHistory();
+    } catch (e) {
+      const msg = formatAnyError(e);
+      setClearStatus(`clear: ERROR ${msg}`);
+      setJsError(`[clear handler] ${msg}`);
+      showToast(`Error: ${msg}`);
+      console.error("[kiklet][ui] clear_all_recordings handler failed", e);
+    } finally {
+      els.btnClearHistory.disabled = false;
+      els.btnClearHistory.textContent = originalText;
+    }
+  });
+
+  // Debug storage button: proves which recordings.json is read from disk
+  els.btnDebugStorage.addEventListener("click", async () => {
+    const originalText = els.btnDebugStorage.textContent;
+    els.btnDebugStorage.textContent = "CLICKED";
+    window.setTimeout(() => {
+      if (els.btnDebugStorage.textContent === "CLICKED") {
+        els.btnDebugStorage.textContent = originalText;
+      }
+    }, 400);
+
+    els.btnDebugStorage.disabled = true;
+    els.btnDebugStorage.textContent = "Loading…";
+    els.debugStorageOut.hidden = true;
+    els.debugStorageOut.textContent = "";
+
+    try {
+      const result = (await invoke("debug_dump_storage_paths")) as any;
+      els.debugStorageOut.textContent = JSON.stringify(result, null, 2);
+      els.debugStorageOut.hidden = false;
+      showToast("Debug storage loaded");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      els.debugStorageOut.textContent = `Error: ${msg}`;
+      els.debugStorageOut.hidden = false;
+      showToast(`Error: ${msg}`);
+      console.error("[kiklet][ui] debug_dump_storage_paths failed", e);
+    } finally {
+      els.btnDebugStorage.disabled = false;
+      els.btnDebugStorage.textContent = originalText;
+    }
+  });
+
   els.audio.addEventListener("ended", () => {
     playingId = null;
     renderHistory(lastRecordings);
@@ -930,7 +1511,126 @@ window.addEventListener("DOMContentLoaded", async () => {
     await refreshHistory();
   });
 
+  // PTT: handle down/up events
+  await listen("hotkey:down", async () => {
+    console.log("[kiklet][ptt][ui] down");
+    isHotkeyHeld = true;
+    
+    if (!isRecording) {
+      // Not recording: set timer for PTT threshold
+      pttArmed = true;
+      pttActive = false;
+      holdMode = false;
+      
+      // Clear any existing timer
+      if (pttTimer !== null) {
+        window.clearTimeout(pttTimer);
+      }
+      
+      // After threshold, if still held, start recording and activate PTT mode
+      pttTimer = window.setTimeout(async () => {
+        if (isHotkeyHeld && !isRecording && pttArmed) {
+          try {
+            await start();
+            pttActive = true;
+            holdMode = true;
+            console.log("[kiklet][ptt][ui] threshold->start holdMode=true");
+          } catch (e) {
+            console.error("[kiklet][ptt][ui] start on threshold failed:", e);
+            pttArmed = false;
+            pttActive = false;
+            holdMode = false;
+          }
+        }
+      }, pttThresholdMs);
+      return;
+    }
+    
+    // Recording already active
+    if (pttActive && holdMode) {
+      // In hold mode, ignore additional downs (wait for up)
+      console.log("[kiklet][ptt][ui] down ignored (holdMode active)");
+      return;
+    } else if (isRecording && !holdMode) {
+      // Toggle-stop: second tap stops (tap-to-toggle)
+      try {
+        await stop();
+        console.log("[kiklet][ptt][ui] tap -> toggle stop");
+        isHotkeyHeld = false;
+        pttArmed = false;
+        pttActive = false;
+        holdMode = false;
+        if (pttTimer !== null) {
+          window.clearTimeout(pttTimer);
+          pttTimer = null;
+        }
+      } catch (e) {
+        console.error("[kiklet][ptt][ui] stop failed:", e);
+        // Reset state anyway
+        isHotkeyHeld = false;
+        pttArmed = false;
+        pttActive = false;
+        holdMode = false;
+        if (pttTimer !== null) {
+          window.clearTimeout(pttTimer);
+          pttTimer = null;
+        }
+      }
+    }
+  });
+
+  await listen("hotkey:up", async () => {
+    console.log("[kiklet][ptt][ui] up");
+    isHotkeyHeld = false;
+    
+    // Clear timer
+    if (pttTimer !== null) {
+      window.clearTimeout(pttTimer);
+      pttTimer = null;
+    }
+    
+    // GUARANTEE: If holdMode is true, ALWAYS stop on release
+    // Also stop if threshold became 0 during recording
+    if ((holdMode && isRecording) || (pttThresholdMs === 0 && isRecording && pttActive)) {
+      try {
+        await stop();
+        console.log("[kiklet][ptt][ui] up holdMode=true -> stop");
+      } catch (e) {
+        console.error("[kiklet][ptt][ui] stop on release failed:", e);
+      }
+      pttArmed = false;
+      pttActive = false;
+      holdMode = false;
+      return;
+    }
+    
+    // If up came before threshold (<300ms) and we're not recording, this is a tap
+    if (!isRecording && pttArmed && !pttActive && !holdMode) {
+      // Quick tap: start recording (toggle)
+      try {
+        await start();
+        console.log("[kiklet][ptt][ui] tap -> toggle");
+      } catch (e) {
+        console.error("[kiklet][ptt][ui] start on tap failed:", e);
+      }
+    }
+    
+    // Reset PTT state
+    pttArmed = false;
+    pttActive = false;
+    holdMode = false;
+  });
+
+  // Fallback: hotkey toggle (via tauri-plugin-global-shortcut, if PTT not available)
   await listen("hotkey:toggle-record", async () => {
+    // Single-source-of-truth: ignore toggle-record if PTT is enabled (threshold_ms > 0)
+    const s = (await invoke("get_settings")) as SettingsDto;
+    const pttEnabled = (s.pttThresholdMs ?? 0) > 0;
+    if (pttEnabled) {
+      console.log("[kiklet][ptt][ui] ignore toggle-record (PTT enabled)");
+      return;
+    }
+    
     try {
       if (isRecording) {
         await stop();

@@ -3,6 +3,9 @@ mod commands;
 mod autostart;
 mod deliver;
 mod hotkey;
+mod hotkey_ptt; // Enabled - safe FFI with error handling
+// mod hotkey_tracker; // Disabled - broken FFI
+// mod modifier_hotkey; // Disabled - broken FFI
 mod perm;
 mod openai;
 mod settings;
@@ -169,6 +172,7 @@ fn fallback_hotkey() -> &'static str {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
@@ -189,45 +193,83 @@ pub fn run() {
             setup_tray(app.handle())?;
             setup_close_to_hide(app.handle());
 
-            // Register hotkey from settings (or default).
-            let configured = {
-                let state = app.state::<AppState>();
-                let s = state.settings.lock().map_err(|_| "settings mutex poisoned")?;
-                if s.hotkey_accelerator.trim().is_empty() {
-                    default_hotkey().to_string()
-                } else {
-                    s.hotkey_accelerator.trim().to_string()
-                }
-            };
-
-            eprintln!("[kiklet][hotkey] register: {configured}");
-            if let Err(err) = crate::hotkey::register(app.handle(), &configured) {
-                eprintln!("[kiklet][hotkey] error: {err}");
-                let fb = fallback_hotkey();
-                eprintln!("[kiklet][hotkey] fallback register: {fb}");
-                if let Err(err2) = crate::hotkey::register(app.handle(), fb) {
-                    eprintln!("[kiklet][hotkey] error: {err2}");
-                    crate::hotkey::set_error(app.handle(), err2);
-                } else {
-                    // Save fallback as the active hotkey for consistency.
-                    {
-                        let state = app.state::<AppState>();
-                        let lock_res = state.settings.lock();
-                        if let Ok(mut s) = lock_res {
-                            s.hotkey_accelerator = fb.to_string();
-                            let _ = state.settings_store.save(&s);
+            // Auto-purge old recordings on startup and schedule daily purge
+            let app_handle = app.handle().clone();
+            
+            // Purge on startup (non-blocking)
+            {
+                let app_handle_purge = app_handle.clone();
+                std::thread::spawn(move || {
+                    eprintln!("[kiklet] startup: purging old recordings (30 days)");
+                    if let Some(state) = app_handle_purge.try_state::<AppState>() {
+                        match state.storage.purge_old_recordings(&app_handle_purge, 30) {
+                            Ok((deleted, kept)) => {
+                                eprintln!("[kiklet] startup purge: deleted={}, kept={}", deleted, kept);
+                            }
+                            Err(e) => {
+                                eprintln!("[kiklet] startup purge failed: {}", e);
+                            }
+                        }
+                    }
+                });
+            }
+            
+            // Schedule daily purge (24 hours = 86400 seconds)
+            let app_handle_daily = app_handle.clone();
+            std::thread::spawn(move || {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(86400)); // 24 hours
+                    eprintln!("[kiklet] daily: purging old recordings (30 days)");
+                    if let Some(state) = app_handle_daily.try_state::<AppState>() {
+                        match state.storage.purge_old_recordings(&app_handle_daily, 30) {
+                            Ok((deleted, kept)) => {
+                                eprintln!("[kiklet] daily purge: deleted={}, kept={}", deleted, kept);
+                                // Emit event to refresh UI if window is open
+                                let _ = app_handle_daily.emit("recordings_updated", ());
+                            }
+                            Err(e) => {
+                                eprintln!("[kiklet] daily purge failed: {}", e);
+                            }
                         }
                     }
                 }
+            });
+
+            // Register hotkey from settings (or default).
+            let state = app.state::<AppState>();
+            let s = state.settings.lock().map_err(|_| "settings mutex poisoned")?;
+            
+            // Temporarily: only support combo hotkeys via plugin
+            // Modifier-only and tracker disabled until FFI is fixed
+            if s.hotkey_kind == "modifier" && !s.hotkey_accelerator.trim().is_empty() {
+                eprintln!("[kiklet][hotkey] modifier-only not supported yet, falling back to default");
+                let def = default_hotkey().to_string();
+                drop(s);
+                if let Err(err) = crate::hotkey::register(app.handle(), &def) {
+                    eprintln!("[kiklet][hotkey] error: {err}");
+                }
             } else {
-                {
-                    let state = app.state::<AppState>();
-                    let lock_res = state.settings.lock();
-                    if let Ok(mut s) = lock_res {
-                        s.hotkey_accelerator = configured;
-                        let _ = state.settings_store.save(&s);
+                // Combo hotkey (or default)
+                let configured = if s.hotkey_accelerator.trim().is_empty() {
+                    default_hotkey().to_string()
+                } else {
+                    s.hotkey_accelerator.trim().to_string()
+                };
+                
+                drop(s);
+                
+                eprintln!("[kiklet][hotkey] register: {configured}");
+                if let Err(err) = crate::hotkey::register(app.handle(), &configured) {
+                    eprintln!("[kiklet][hotkey] error: {err}");
+                    let fb = fallback_hotkey();
+                    eprintln!("[kiklet][hotkey] fallback register: {fb}");
+                    if let Err(err2) = crate::hotkey::register(app.handle(), fb) {
+                        eprintln!("[kiklet][hotkey] error: {err2}");
+                        crate::hotkey::set_error(app.handle(), err2);
                     }
                 }
+                
+                // PTT tracker disabled - FFI causes SIGTRAP
             }
 
             debug_log("ready");
@@ -253,8 +295,22 @@ pub fn run() {
             commands::start_recording,
             commands::stop_recording,
             commands::list_recordings,
+            commands::ptt_start,
+            commands::ptt_stop,
+            commands::ptt_status,
+            commands::set_ptt_threshold_ms,
+            commands::list_models,
+            commands::translate_text,
+            commands::set_translate_target,
+            commands::set_translate_model,
             commands::reveal_in_finder,
-            commands::open_recordings_folder
+            commands::open_recordings_folder,
+            commands::purge_old_recordings,
+            commands::clear_all_recordings,
+            commands::debug_dump_storage_paths,
+            commands::debug_ping,
+            #[cfg(debug_assertions)]
+            commands::debug_print_recordings_paths,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

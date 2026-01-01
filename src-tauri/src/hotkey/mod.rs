@@ -34,24 +34,10 @@ pub fn unregister(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-pub fn register(app: &AppHandle, accelerator: &str) -> Result<(), String> {
-    eprintln!("[kiklet][hotkey] register: {accelerator}");
-    let state = app
-        .try_state::<HotkeyState>()
-        .ok_or_else(|| "hotkey state missing".to_string())?;
-
-    // Capture previous so we can rollback if new registration fails.
-    let prev = state
-        .current
-        .lock()
-        .map_err(|_| "hotkey mutex poisoned".to_string())?
-        .clone();
-
-    // Unregister old first (per spec).
-    unregister(app)?;
-
+// Try to register a single accelerator (does NOT unregister old)
+fn try_register_single(app: &AppHandle, accelerator: &str) -> Result<(), String> {
     let acc = accelerator.to_string();
-    let reg_res = app.global_shortcut().on_shortcut(
+    app.global_shortcut().on_shortcut(
         acc.as_str(),
         move |app_handle, _shortcut, event| {
             if event.state != ShortcutState::Pressed {
@@ -60,59 +46,47 @@ pub fn register(app: &AppHandle, accelerator: &str) -> Result<(), String> {
             eprintln!("[kiklet][hotkey] triggered");
             let _ = app_handle.emit("hotkey:toggle-record", ());
         },
-    );
-    if let Err(err) = reg_res {
-        // Rollback: best-effort re-register previous hotkey.
-        if let Some(prev) = prev.clone() {
-            eprintln!("[kiklet][hotkey] rollback register: {prev}");
-            let rollback_res = app.global_shortcut().on_shortcut(
-                prev.as_str(),
-                move |app_handle, _shortcut, event| {
-                    if event.state != ShortcutState::Pressed {
-                        return;
-                    }
-                    eprintln!("[kiklet][hotkey] triggered");
-                    let _ = app_handle.emit("hotkey:toggle-record", ());
-                },
-            );
-            match rollback_res {
-                Ok(()) => {
-                    eprintln!("[kiklet][hotkey] rollback ok");
-                    if let Ok(mut g) = state.current.lock() {
-                        *g = Some(prev);
-                    }
-                }
-                Err(err2) => {
-                    eprintln!("[kiklet][hotkey] rollback failed: {err2}");
-                    if let Ok(mut g) = state.current.lock() {
-                        *g = None;
-                    }
-                    return Err(format!(
-                        "failed to register hotkey: {}; rollback to previous failed: {}",
-                        err,
-                        err2
-                    ));
-                }
+    )
+    .map_err(|e| e.to_string())
+}
+
+pub fn register(app: &AppHandle, accelerator: &str) -> Result<(), String> {
+    eprintln!("[kiklet][hotkey] register: {accelerator}");
+    let state = app
+        .try_state::<HotkeyState>()
+        .ok_or_else(|| "hotkey state missing".to_string())?;
+
+    // Try to register new WITHOUT unregistering old first
+    match try_register_single(app, accelerator) {
+        Ok(()) => {
+            // Success: now unregister old
+            let _prev = state
+                .current
+                .lock()
+                .map_err(|_| "hotkey mutex poisoned".to_string())?
+                .clone();
+            if _prev.is_some() {
+                let _ = unregister(app); // Best-effort, ignore errors
             }
-            return Err(err.to_string());
+            
+            // Update state
+            *state
+                .current
+                .lock()
+                .map_err(|_| "hotkey mutex poisoned".to_string())? = Some(accelerator.to_string());
+            *state
+                .last_error
+                .lock()
+                .map_err(|_| "hotkey mutex poisoned".to_string())? = None;
+            
+            eprintln!("[kiklet][hotkey] register_ok {}", accelerator);
+            Ok(())
         }
-        if let Ok(mut g) = state.current.lock() {
-            *g = None;
+        Err(err) => {
+            eprintln!("[kiklet][hotkey] register_failed {}: {}", accelerator, err);
+            Err(err)
         }
-        return Err(err.to_string());
     }
-
-    *state
-        .current
-        .lock()
-        .map_err(|_| "hotkey mutex poisoned".to_string())? = Some(acc.clone());
-
-    *state
-        .last_error
-        .lock()
-        .map_err(|_| "hotkey mutex poisoned".to_string())? = None;
-
-    Ok(())
 }
 
 pub fn set_error(app: &AppHandle, err: String) {

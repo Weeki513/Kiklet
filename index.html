@@ -68,14 +68,44 @@
           <div class="row">
             <div class="row-left">
               <div class="label">Автоперевод</div>
-              <div class="sub">Язык вывода (позже)</div>
+              <div class="sub">Язык вывода</div>
+            </div>
+            <div class="row-right">
+              <div style="position: relative; width: 200px;">
+                <input
+                  id="input-translate"
+                  type="text"
+                  class="input"
+                  placeholder="Не переводить"
+                  autocomplete="off"
+                  style="width: 100%; padding-right: 30px;"
+                />
+                <button
+                  id="btn-translate-clear"
+                  type="button"
+                  style="position: absolute; right: 8px; top: 50%; transform: translateY(-50%); background: none; border: none; cursor: pointer; font-size: 16px; color: #666; padding: 0; width: 20px; height: 20px; display: none;"
+                  title="Очистить"
+                >
+                  ×
+                </button>
+                <div
+                  id="translate-autocomplete"
+                  style="position: absolute; top: 100%; left: 0; right: 0; background: white; border: 1px solid #ddd; border-radius: 4px; max-height: 200px; overflow-y: auto; z-index: 1000; display: none; margin-top: 2px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);"
+                ></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 3.5) Translate Model -->
+          <div class="row">
+            <div class="row-left">
+              <div class="label">Модель перевода</div>
+              <div class="sub">Модель, которая выполняет перевод. Рекомендуем: gpt-4.1</div>
             </div>
             <div class="row-right">
               <div class="select">
-                <select id="select-translate" title="Автоперевод">
-                  <option value="off">Выключено</option>
-                  <option value="ru">Русский</option>
-                  <option value="en">English</option>
+                <select id="select-translate-model" title="Модель перевода">
+                  <option value="gpt-4o">gpt-4o</option>
                 </select>
                 <span class="select-chev" aria-hidden="true"></span>
               </div>
@@ -95,6 +125,26 @@
               </button>
               <button class="chip-btn" id="hotkey-reset" type="button" hidden title="Сбросить">Сброс</button>
               <div class="inline-msg" id="hotkey-msg" hidden></div>
+            </div>
+          </div>
+
+          <!-- 4.5) PTT Delay -->
+          <div class="row">
+            <div class="row-left">
+              <div class="label">Задержка Push-to-Talk (мс)</div>
+              <div class="sub">Рекомендуется 300 мс. Значение 0 выключает Push-to-Talk.</div>
+            </div>
+            <div class="row-right">
+              <input
+                id="input-ptt-threshold"
+                type="number"
+                min="0"
+                step="1"
+                class="input"
+                style="width: 100px;"
+                title="Задержка Push-to-Talk в миллисекундах"
+              />
+              <div class="inline-msg" id="ptt-threshold-msg" hidden></div>
             </div>
           </div>
 
@@ -159,8 +209,16 @@
         <div class="list" id="history-list">
           <div class="list-head">
             <div class="muted" id="count"></div>
+            <div class="muted" style="margin-top: 8px; font-size: 12px;">Автоудаление записей старше 30 дней</div>
           </div>
           <div id="items" class="items"></div>
+          <div style="margin-top: 16px; padding-top: 16px; border-top: 1px solid #eee;">
+            <button class="btn btn-secondary" id="btn-clear-history" type="button" style="width: 100%;">Clear history</button>
+            <div id="clear-status" class="mono" style="margin-top: 8px; font-size: 12px; line-height: 1.35; color: #333;" hidden></div>
+            <div id="js-error" class="mono" style="margin-top: 8px; font-size: 12px; line-height: 1.35; color: #b00020;" hidden></div>
+            <button class="btn btn-secondary" id="btn-debug-storage" type="button" style="width: 100%; margin-top: 8px;">Debug storage</button>
+            <pre id="debug-storage-out" class="mono" style="margin-top: 8px; white-space: pre-wrap; font-size: 12px; line-height: 1.35; background: #fafafa; border: 1px solid #eee; padding: 8px; border-radius: 10px;" hidden></pre>
+          </div>
         </div>
       </section>
 
