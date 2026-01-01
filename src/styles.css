@@ -36,12 +36,19 @@
 html,
 body {
   height: 100%;
+  overflow: visible; /* Allow HUD content to overflow if needed */
 }
 
 body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
+  overflow: visible; /* Allow HUD content to overflow if needed */
+}
+
+/* HUD window mode: fully transparent background */
+body:has(#cursor-hud:not(.cursor-hud-hidden)) {
+  background: transparent !important;
 }
 
 .app {
@@ -241,6 +248,82 @@ body {
   left: 2px;
   background: rgba(255, 255, 255, 0.55);
   transition: transform 180ms ease-out, background 180ms ease-out;
+}
+
+/* =========================
+   Cursor HUD (near cursor)
+   - Hidden by default (NO idle state)
+   - pointer-events: none
+   ========================= */
+.cursor-hud {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 999999;
+  pointer-events: none;
+  user-select: none;
+  transform-origin: top left;
+  /* External container background - bright pink */
+  background: rgba(255, 20, 147, 0.35);
+  backdrop-filter: blur(24px) saturate(1.4);
+  -webkit-backdrop-filter: blur(24px) saturate(1.4);
+  border-radius: 24px;
+  padding: 4px;
+}
+
+.cursor-hud-hidden {
+  opacity: 0;
+  transform: translate3d(0, 0, 0) scale(0.96);
+  filter: blur(0.2px);
+}
+
+.cursor-hud-visible {
+  opacity: 1;
+  transform: translate3d(0, 0, 0) scale(1);
+}
+
+.cursor-hud {
+  transition: opacity 140ms ease-out, transform 140ms ease-out;
+}
+
+.cursor-hud-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: 20px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(17, 19, 26, 0.24);
+  backdrop-filter: blur(24px) saturate(1.4);
+  -webkit-backdrop-filter: blur(24px) saturate(1.4);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35), 0 0 0 0.5px rgba(255, 255, 255, 0.05) inset;
+  overflow: visible; /* Ensure content is not clipped */
+  min-width: fit-content; /* Allow content to determine width */
+}
+
+.cursor-hud-text {
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: rgba(255, 255, 255, 0.92);
+  white-space: nowrap;
+}
+
+.cursor-hud-meters {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 20px;
+}
+
+.cursor-hud-meter {
+  width: 3px;
+  min-height: 3px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(106, 169, 255, 0.95), rgba(61, 220, 151, 0.85));
+  opacity: 0.9;
+  transition: height 50ms ease-out, opacity 50ms ease-out;
+  will-change: height;
 }
 .toggle input:checked + .toggle-track {
   background: rgba(106, 169, 255, 0.35);

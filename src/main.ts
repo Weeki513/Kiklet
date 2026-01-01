@@ -76,6 +76,11 @@ const els = {
   btnDebugStorage: document.getElementById("btn-debug-storage") as HTMLButtonElement,
   debugStorageOut: document.getElementById("debug-storage-out") as HTMLPreElement,
 
+  // Cursor HUD
+  cursorHud: document.getElementById("cursor-hud") as HTMLDivElement,
+  cursorHudText: document.getElementById("cursor-hud-text") as HTMLDivElement,
+  cursorHudMeters: document.getElementById("cursor-hud-meters") as HTMLDivElement,
+
   // API key modal
   modal: document.getElementById("modal") as HTMLDivElement,
   apiKey: document.getElementById("api-key") as HTMLInputElement,
@@ -185,6 +190,105 @@ function formatAnyError(e: unknown): string {
     return String(e);
   }
 }
+
+// =========================
+// Cursor HUD (near cursor)
+// =========================
+type CursorHudPhase = "recording" | "transcribing" | "translating" | "inserted" | "clipboard";
+
+let lastMouseX = 0;
+let lastMouseY = 0;
+const HUD_OFFSET_X = 12;
+const HUD_OFFSET_Y = 16;
+
+let hudVisible = false;
+let hudPhase: CursorHudPhase | null = null;
+let hudHideTimer: number | null = null;
+let hudArmed = false; // only true for hotkey-driven flows
+
+const hudMeters = Array.from(
+  els.cursorHudMeters.querySelectorAll(".cursor-hud-meter"),
+) as HTMLDivElement[];
+
+let hudTargetLevel = 0; // 0..1
+let hudDisplayLevel = 0; // 0..1
+let hudShowMeters = false;
+
+function hudPosition() {
+  els.cursorHud.style.left = `${Math.round(lastMouseX + HUD_OFFSET_X)}px`;
+  els.cursorHud.style.top = `${Math.round(lastMouseY + HUD_OFFSET_Y)}px`;
+}
+
+function hudShow(
+  phase: CursorHudPhase,
+  opts: { text: string; ttlMs?: number; showMeters?: boolean },
+) {
+  hudArmed = true;
+  hudVisible = true;
+  hudPhase = phase;
+  hudShowMeters = Boolean(opts.showMeters);
+
+  els.cursorHudText.textContent = opts.text;
+  els.cursorHudMeters.hidden = !hudShowMeters;
+
+  if (hudHideTimer) window.clearTimeout(hudHideTimer);
+  hudHideTimer = null;
+
+  hudPosition();
+  els.cursorHud.classList.remove("cursor-hud-hidden");
+  els.cursorHud.classList.add("cursor-hud-visible");
+
+  if (opts.ttlMs && opts.ttlMs > 0) {
+    hudHideTimer = window.setTimeout(() => {
+      hudHide();
+    }, opts.ttlMs);
+  }
+}
+
+function hudHide() {
+  hudVisible = false;
+  hudPhase = null;
+  hudShowMeters = false;
+  hudTargetLevel = 0;
+  hudDisplayLevel = 0;
+
+  if (hudHideTimer) window.clearTimeout(hudHideTimer);
+  hudHideTimer = null;
+
+  els.cursorHud.classList.remove("cursor-hud-visible");
+  els.cursorHud.classList.add("cursor-hud-hidden");
+
+  // Disarm after completion so HUD stays hidden until next hotkey flow.
+  hudArmed = false;
+}
+
+function hudSetLevel(level0to1: number) {
+  hudTargetLevel = Math.max(0, Math.min(1, level0to1));
+}
+
+function hudTick() {
+  // Cheap rAF loop, updates only when visible and meters enabled.
+  if (hudVisible && hudShowMeters) {
+    // Smooth decay for visual appeal
+    hudDisplayLevel = Math.max(hudDisplayLevel * 0.90, hudTargetLevel);
+
+    const base = hudDisplayLevel;
+    const numBars = hudMeters.length;
+    for (let i = 0; i < numBars; i++) {
+      // More expressive mapping: each bar activates at different thresholds
+      const threshold = i / numBars;
+      const v = Math.max(0, Math.min(1, (base - threshold) / (1 - threshold + 0.1)));
+      // Height: min 3px, max 18px
+      const h = 3 + v * 15;
+      hudMeters[i].style.height = `${h.toFixed(1)}px`;
+      // Opacity: more visible even at low levels
+      hudMeters[i].style.opacity = (0.4 + v * 0.6).toFixed(2);
+    }
+  }
+  window.requestAnimationFrame(hudTick);
+}
+
+window.requestAnimationFrame(hudTick);
 
 function setModalError(text: string | null) {
   if (!text) {
@@ -712,10 +816,12 @@ type DeliveryResult = {
   detail?: string;
 };
 
-async function deliverAfterFinalText(text: string) {
+const IS_HUD_WINDOW = window.location.hash === "#hud";
+
+async function deliverAfterFinalText(text: string): Promise<DeliveryResult | null> {
   // Always call deliver_text - it will handle autoinsert_enabled internally
   // Even if autoinsert is disabled, text should go to clipboard
-  if (!text.trim()) return;
+  if (!text.trim()) return null;
   try {
     const res = (await invoke("deliver_text", { text })) as DeliveryResult;
     const delivered = res.mode === "insert" ? "pasted" : "clipboard";
@@ -730,6 +836,7 @@ async function deliverAfterFinalText(text: string) {
         setDeliverMsg(null);
       }, 1800);
     }
+    return res;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error("[kiklet] deliver_text failed:", e);
@@ -738,6 +845,7 @@ async function deliverAfterFinalText(text: string) {
       setDeliverMsg(`Failed: ${msg}`);
     }
   }
+  return null;
 }
 
 async function maybeAutoTranscribe(
@@ -1104,11 +1212,16 @@ async function deleteRecording() {
   }
 }
 
-async function start() {
+async function start(source: "hotkey" | "ui" = "ui") {
+  if (source === "hotkey") {
+    try {
+      await invoke("hud_activate");
+    } catch {}
+  }
   await invoke("start_recording");
 }
 
-async function stop() {
+async function stop(_source: "hotkey" | "ui" = "ui") {
   try {
     const item = (await invoke("stop_recording")) as RecordingItem;
     // After recording stops, refresh history first, then maybe auto-transcribe
@@ -1139,6 +1252,26 @@ window.addEventListener("DOMContentLoaded", async () => {
   });
 
   loadUiPrefs();
+
+  // HUD window mode: hide main UI entirely (HUD is shown only when active)
+  if (IS_HUD_WINDOW) {
+    const mainEl = document.querySelector("main.app") as HTMLElement | null;
+    if (mainEl) mainEl.style.display = "none";
+    document.body.style.background = "transparent";
+    document.documentElement.style.background = "transparent";
+    // Ensure no IDLE state is shown - HUD starts hidden
+    els.cursorHud.classList.add("cursor-hud-hidden");
+  } else {
+    // Main window should never show cursor HUD inline (we use separate hud window)
+    els.cursorHud.style.display = "none";
+  }
+
+  // Track cursor position for HUD placement
+  window.addEventListener("mousemove", (e) => {
+    lastMouseX = e.clientX;
+    lastMouseY = e.clientY;
+    if (hudVisible) hudPosition();
+  });
 
   els.toggleAutostart.addEventListener("change", onAutostartToggle);
   els.toggleAutoInsert.addEventListener("change", onAutoInsertToggle);
@@ -1349,8 +1482,8 @@ window.addEventListener("DOMContentLoaded", async () => {
   els.fieldApiKey.addEventListener("click", openApiKeyModal);
   els.btnTutorial.addEventListener("click", () => showToast("Туториал скоро"));
 
-  els.btnStart.addEventListener("click", start);
-  els.btnStop.addEventListener("click", stop);
+  els.btnStart.addEventListener("click", () => void start("ui"));
+  els.btnStop.addEventListener("click", () => void stop("ui"));
 
   els.btnSaveKey.addEventListener("click", saveApiKey);
   els.btnCloseModal.addEventListener("click", closeApiKeyModal);
@@ -1511,6 +1644,38 @@ window.addEventListener("DOMContentLoaded", async () => {
     await refreshHistory();
   });
 
+  // Cursor HUD: audio level during recording (best-effort)
+  await listen<{ level: number }>("cursor_hud_audio_level", (event) => {
+    if (!hudArmed) return;
+    if (hudPhase !== "recording") return;
+    hudSetLevel(Number(event.payload?.level ?? 0));
+  });
+
+  // HUD window: receive global status + level from backend
+  if (IS_HUD_WINDOW) {
+    await listen<{ phase: string; text: string }>("hud_status", (event) => {
+      const phase = String((event.payload as any)?.phase || "");
+      const text = String((event.payload as any)?.text || "");
+      if (phase === "recording") {
+        hudShow("recording", { text: text || "Recording…", showMeters: true });
+      } else if (phase === "transcribing") {
+        hudShow("transcribing", { text: text || "Transcribing…" });
+      } else if (phase === "translating") {
+        hudShow("translating", { text: text || "Translating…" });
+      } else if (phase === "inserted") {
+        hudShow("inserted", { text: text || "Inserted", ttlMs: 1100 });
+      } else if (phase === "clipboard") {
+        hudShow("clipboard", { text: text || "Copied to clipboard", ttlMs: 1200 });
+      }
+    });
+
+    await listen<{ level: number }>("hud_level", (event) => {
+      // Applies only in recording phase
+      if (hudPhase !== "recording") return;
+      hudSetLevel(Number((event.payload as any)?.level ?? 0));
+    });
+  }
+
   // PTT: handle down/up events
   await listen("hotkey:down", async () => {
     console.log("[kiklet][ptt][ui] down");
@@ -1531,7 +1696,7 @@ window.addEventListener("DOMContentLoaded", async () => {
       pttTimer = window.setTimeout(async () => {
         if (isHotkeyHeld && !isRecording && pttArmed) {
           try {
-            await start();
+            await start("hotkey");
             pttActive = true;
             holdMode = true;
             console.log("[kiklet][ptt][ui] threshold->start holdMode=true");
@@ -1554,7 +1719,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     } else if (isRecording && !holdMode) {
       // Toggle-stop: second tap stops (tap-to-toggle)
       try {
-        await stop();
+        await stop("hotkey");
         console.log("[kiklet][ptt][ui] tap -> toggle stop");
         isHotkeyHeld = false;
         pttArmed = false;
@@ -1593,7 +1758,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     // Also stop if threshold became 0 during recording
     if ((holdMode && isRecording) || (pttThresholdMs === 0 && isRecording && pttActive)) {
       try {
-        await stop();
+        await stop("hotkey");
         console.log("[kiklet][ptt][ui] up holdMode=true -> stop");
       } catch (e) {
         console.error("[kiklet][ptt][ui] stop on release failed:", e);
@@ -1608,7 +1773,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     if (!isRecording && pttArmed && !pttActive && !holdMode) {
       // Quick tap: start recording (toggle)
       try {
-        await start();
+        await start("hotkey");
         console.log("[kiklet][ptt][ui] tap -> toggle");
       } catch (e) {
         console.error("[kiklet][ptt][ui] start on tap failed:", e);
@@ -1633,9 +1798,9 @@ window.addEventListener("DOMContentLoaded", async () => {
     
     try {
       if (isRecording) {
-        await stop();
+        await stop("hotkey");
       } else {
-        await start();
+        await start("hotkey");
       }
     } catch (e) {
       console.error("[kiklet] hotkey toggle failed:", e);

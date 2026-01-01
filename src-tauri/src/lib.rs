@@ -10,6 +10,7 @@ mod perm;
 mod openai;
 mod settings;
 mod storage;
+mod hud;
 
 use std::sync::Mutex;
 
@@ -176,6 +177,35 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
+            // Create HUD window (global always-on-top), hidden by default.
+            // Loads the same frontend with hash #hud to render minimal HUD UI.
+            {
+                use tauri::{WebviewUrl, WebviewWindowBuilder};
+                let hud_url = WebviewUrl::App("index.html#hud".into());
+                let hud = WebviewWindowBuilder::new(app, crate::hud::HUD_WINDOW_LABEL, hud_url)
+                    .title("Kiklet HUD")
+                    .build();
+                if let Ok(hud_w) = hud {
+                    // Configure HUD window: always-on-top, no decorations, hidden by default.
+                    // Transparency is handled via CSS (body background transparent).
+                    let _ = hud_w.set_decorations(false);
+                    let _ = hud_w.set_always_on_top(true);
+                    let _ = hud_w.set_skip_taskbar(true);
+                    let _ = hud_w.set_resizable(false);
+                    let _ = hud_w.set_size(tauri::Size::Physical(tauri::PhysicalSize { width: 360, height: 140 }));
+                    let _ = hud_w.hide();
+
+                    // Click-through + all spaces (best-effort; macOS-only methods may not exist on other OS).
+                    let _ = hud_w.set_ignore_cursor_events(true);
+                    #[cfg(target_os = "macos")]
+                    {
+                        let _ = hud_w.set_visible_on_all_workspaces(true);
+                    }
+                } else {
+                    eprintln!("[kiklet][hud] failed to create hud window");
+                }
+            }
+
             let storage = Storage::new(app.handle())?;
             let recordings = storage.load_or_rebuild_index()?;
             let settings_store = SettingsStore::new(app.handle())?;
@@ -309,6 +339,8 @@ pub fn run() {
             commands::clear_all_recordings,
             commands::debug_dump_storage_paths,
             commands::debug_ping,
+            commands::hud_activate,
+            commands::hud_deactivate,
             #[cfg(debug_assertions)]
             commands::debug_print_recordings_paths,
         ])

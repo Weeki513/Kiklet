@@ -11,6 +11,8 @@ use crate::openai;
 use crate::perm;
 use crate::storage::{recordings_dir, ClearAllReport, RecordingEntry, RecordingsIndex};
 use crate::{emit_recording_state, set_tray_recording_state, AppState};
+use std::time::Duration;
+use crate::hud;
 
 fn trunc200(s: &str) -> String {
     let mut out = s.replace('\n', " ").replace('\r', " ");
@@ -101,7 +103,11 @@ pub fn set_autoinsert_enabled(state: State<'_, AppState>, enabled: bool) -> Resu
 }
 
 #[tauri::command]
-pub fn deliver_text(_state: State<'_, AppState>, text: String) -> Result<deliver::DeliveryResult, String> {
+pub fn deliver_text(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    text: String,
+) -> Result<deliver::DeliveryResult, String> {
     #[cfg(target_os = "macos")]
     let platform = "macos";
     #[cfg(target_os = "windows")]
@@ -110,7 +116,7 @@ pub fn deliver_text(_state: State<'_, AppState>, text: String) -> Result<deliver
     let platform = "other";
 
     let attempt_insert = {
-        let s = _state
+        let s = state
             .settings
             .lock()
             .map_err(|_| "settings mutex poisoned".to_string())?;
@@ -133,6 +139,23 @@ pub fn deliver_text(_state: State<'_, AppState>, text: String) -> Result<deliver
                 res.mode,
                 detail_str
             );
+
+            // HUD: final phase + auto-hide after ~1.1s (only if hud is active)
+            if hud::is_active() {
+                match res.mode {
+                    deliver::DeliveryMode::Insert => {
+                        hud::emit_status(&app, "inserted", "Inserted");
+                    }
+                    deliver::DeliveryMode::Copy => {
+                        hud::emit_status(&app, "clipboard", "Copied to clipboard");
+                    }
+                }
+                let app_clone = app.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(1150));
+                    hud::deactivate(&app_clone);
+                });
+            }
             Ok(res)
         }
         Err(err) => {
@@ -669,6 +692,9 @@ pub async fn transcribe_file(
         return Err("path must be inside the recordings folder".to_string());
     }
 
+    // HUD: transcribing (only if active)
+    hud::emit_status(&app, "transcribing", "Transcribing…");
+
     openai::transcribe_whisper(&api_key, &requested)
         .await
         .map_err(|e| e.to_string())
@@ -743,6 +769,9 @@ fn to_item(storage: &crate::storage::Storage, e: &RecordingEntry) -> RecordingIt
 
 #[tauri::command]
 pub fn start_recording(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    // HUD: recording phase (only if hud is active)
+    hud::emit_status(&app, "recording", "Recording…");
+
     {
         let mut guard = state
             .active_recording
@@ -757,6 +786,27 @@ pub fn start_recording(app: AppHandle, state: State<'_, AppState>) -> Result<(),
             .map_err(|e| format!("failed to get recordings_dir: {e}"))?;
         let active = audio::start_recording(&recordings_dir_path)
             .map_err(|e| format!("failed to start recording: {e}"))?;
+
+        // Spawn audio level emitter (20–30 Hz) while recording is active.
+        // Emits to HUD window only; stops when active_recording becomes None or HUD deactivated.
+        let level_arc = active.level_milli_arc();
+        let app_clone = app.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_millis(40));
+            if !hud::is_active() {
+                break;
+            }
+            let is_recording = app_clone
+                .try_state::<AppState>()
+                .and_then(|s| s.active_recording.lock().ok().map(|g| g.is_some()))
+                .unwrap_or(false);
+            if !is_recording {
+                break;
+            }
+            let level = level_arc.load(std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0;
+            hud::emit_level(&app_clone, level);
+        });
+
         *guard = Some(active);
     }
 
@@ -767,6 +817,8 @@ pub fn start_recording(app: AppHandle, state: State<'_, AppState>) -> Result<(),
 
 #[tauri::command]
 pub fn stop_recording(app: AppHandle, state: State<'_, AppState>) -> Result<RecordingItem, String> {
+    // HUD: transcribing phase (only if hud is active)
+    hud::emit_status(&app, "transcribing", "Transcribing…");
     let active = {
         let mut guard = state
             .active_recording
@@ -1046,6 +1098,18 @@ pub fn debug_dump_storage_paths(app: AppHandle, state: State<'_, AppState>) -> R
 pub fn debug_ping() -> String {
     println!("[kiklet][commands] debug_ping");
     "pong".to_string()
+}
+
+#[tauri::command]
+pub fn hud_activate(app: AppHandle) -> Result<bool, String> {
+    hud::activate(&app)?;
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn hud_deactivate(app: AppHandle) -> Result<bool, String> {
+    hud::deactivate(&app);
+    Ok(true)
 }
 
 #[cfg(debug_assertions)]
@@ -1375,6 +1439,7 @@ pub async fn list_models(state: State<'_, AppState>) -> Result<Vec<String>, Stri
 
 #[tauri::command]
 pub async fn translate_text(
+    app: AppHandle,
     state: State<'_, AppState>,
     text: String,
     target_language: String,
@@ -1388,6 +1453,9 @@ pub async fn translate_text(
         target_language,
         text.len()
     );
+
+    // HUD: translating (only if active)
+    hud::emit_status(&app, "translating", "Translating…");
     
     // Get API key
     let api_key = {

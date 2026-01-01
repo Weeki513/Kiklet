@@ -6,6 +6,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     mpsc, Arc, Mutex,
 };
+use std::sync::atomic::AtomicU32;
 use time::format_description::FormatItem;
 use time::macros::format_description;
 
@@ -76,6 +77,7 @@ pub struct RecordingSession {
     created_at: String,
     stop_tx: mpsc::Sender<()>,
     join: Option<std::thread::JoinHandle<Result<FinishedRecording, AudioError>>>,
+    level_milli: Arc<AtomicU32>, // 0..1000
 }
 
 impl RecordingSession {
@@ -85,6 +87,10 @@ impl RecordingSession {
 
     pub fn created_at(&self) -> &str {
         &self.created_at
+    }
+
+    pub fn level_milli_arc(&self) -> Arc<AtomicU32> {
+        Arc::clone(&self.level_milli)
     }
 
     pub fn start(recordings_dir: &Path) -> Result<Self, AudioError> {
@@ -113,6 +119,8 @@ impl RecordingSession {
 
         let filename_thread = filename.clone();
         let created_at_thread = created_at.clone();
+        let level_milli = Arc::new(AtomicU32::new(0));
+        let level_milli_thread = Arc::clone(&level_milli);
 
         let join = std::thread::spawn(move || -> Result<FinishedRecording, AudioError> {
             let host = cpal::default_host();
@@ -155,9 +163,56 @@ impl RecordingSession {
                         };
                         let Some(w) = guard.as_mut() else { return };
 
+                        let mut sumsq = 0.0f32;
+                        let mut count = 0u32;
                         for i in (0..data.len()).step_by(channels_in) {
-                            if let Ok(()) = w.write_sample(data[i]) {
+                            let s = data[i];
+                            if let Ok(()) = w.write_sample(s) {
                                 samples_written_cb.fetch_add(1, Ordering::Relaxed);
+                            }
+                            let f = (s as f32) / (i16::MAX as f32);
+                            sumsq += f * f;
+                            count += 1;
+                        }
+                        if count > 0 {
+                            // Calculate RMS
+                            let rms = (sumsq / count as f32).sqrt();
+                            
+                            // Convert to dBFS (decibels relative to full scale)
+                            const EPS: f32 = 1e-10;
+                            let db = 20.0 * (rms.max(EPS)).log10();
+                            
+                            // Normalize: noise floor -55dB, max -10dB
+                            const NOISE_FLOOR_DB: f32 = -55.0;
+                            const MAX_DB: f32 = -10.0;
+                            let level = ((db - NOISE_FLOOR_DB) / (MAX_DB - NOISE_FLOOR_DB)).clamp(0.0, 1.0);
+                            
+                            // Apply gain (1.5x) for better sensitivity
+                            let level = (level * 1.5).min(1.0);
+                            
+                            // Smoothing: attack faster, release slower
+                            let prev = level_milli_thread.load(Ordering::Relaxed) as f32 / 1000.0;
+                            let smooth = if level > prev {
+                                // Attack: faster response to increases
+                                prev * 0.65 + level * 0.35
+                            } else {
+                                // Release: slower decay
+                                prev * 0.88 + level * 0.12
+                            };
+                            level_milli_thread.store((smooth * 1000.0) as u32, Ordering::Relaxed);
+                            
+                            // Debug log (once per ~500ms, only in debug builds)
+                            #[cfg(debug_assertions)]
+                            {
+                                use std::sync::atomic::AtomicU64;
+                                static COUNTER: AtomicU64 = AtomicU64::new(0);
+                                let c = COUNTER.fetch_add(1, Ordering::Relaxed);
+                                if c % 12500 == 0 { // ~500ms at 25kHz sample rate
+                                    eprintln!(
+                                        "[kiklet][audio] rms={:.4} db={:.1} level={:.3} smooth={:.3}",
+                                        rms, db, level, smooth
+                                    );
+                                }
                             }
                         }
                     },
@@ -173,9 +228,56 @@ impl RecordingSession {
                         };
                         let Some(w) = guard.as_mut() else { return };
 
+                        let mut sumsq = 0.0f32;
+                        let mut count = 0u32;
                         for i in (0..data.len()).step_by(channels_in) {
-                            if let Ok(()) = w.write_sample(u16_to_i16(data[i])) {
+                            let s = u16_to_i16(data[i]);
+                            if let Ok(()) = w.write_sample(s) {
                                 samples_written_cb.fetch_add(1, Ordering::Relaxed);
+                            }
+                            let f = (s as f32) / (i16::MAX as f32);
+                            sumsq += f * f;
+                            count += 1;
+                        }
+                        if count > 0 {
+                            // Calculate RMS
+                            let rms = (sumsq / count as f32).sqrt();
+                            
+                            // Convert to dBFS (decibels relative to full scale)
+                            const EPS: f32 = 1e-10;
+                            let db = 20.0 * (rms.max(EPS)).log10();
+                            
+                            // Normalize: noise floor -55dB, max -10dB
+                            const NOISE_FLOOR_DB: f32 = -55.0;
+                            const MAX_DB: f32 = -10.0;
+                            let level = ((db - NOISE_FLOOR_DB) / (MAX_DB - NOISE_FLOOR_DB)).clamp(0.0, 1.0);
+                            
+                            // Apply gain (1.5x) for better sensitivity
+                            let level = (level * 1.5).min(1.0);
+                            
+                            // Smoothing: attack faster, release slower
+                            let prev = level_milli_thread.load(Ordering::Relaxed) as f32 / 1000.0;
+                            let smooth = if level > prev {
+                                // Attack: faster response to increases
+                                prev * 0.65 + level * 0.35
+                            } else {
+                                // Release: slower decay
+                                prev * 0.88 + level * 0.12
+                            };
+                            level_milli_thread.store((smooth * 1000.0) as u32, Ordering::Relaxed);
+                            
+                            // Debug log (once per ~500ms, only in debug builds)
+                            #[cfg(debug_assertions)]
+                            {
+                                use std::sync::atomic::AtomicU64;
+                                static COUNTER: AtomicU64 = AtomicU64::new(0);
+                                let c = COUNTER.fetch_add(1, Ordering::Relaxed);
+                                if c % 12500 == 0 { // ~500ms at 25kHz sample rate
+                                    eprintln!(
+                                        "[kiklet][audio] rms={:.4} db={:.1} level={:.3} smooth={:.3}",
+                                        rms, db, level, smooth
+                                    );
+                                }
                             }
                         }
                     },
@@ -191,9 +293,56 @@ impl RecordingSession {
                         };
                         let Some(w) = guard.as_mut() else { return };
 
+                        let mut sumsq = 0.0f32;
+                        let mut count = 0u32;
                         for i in (0..data.len()).step_by(channels_in) {
-                            if let Ok(()) = w.write_sample(f32_to_i16(data[i])) {
+                            let s = data[i];
+                            if let Ok(()) = w.write_sample(f32_to_i16(s)) {
                                 samples_written_cb.fetch_add(1, Ordering::Relaxed);
+                            }
+                            let f = s.clamp(-1.0, 1.0);
+                            sumsq += f * f;
+                            count += 1;
+                        }
+                        if count > 0 {
+                            // Calculate RMS
+                            let rms = (sumsq / count as f32).sqrt();
+                            
+                            // Convert to dBFS (decibels relative to full scale)
+                            const EPS: f32 = 1e-10;
+                            let db = 20.0 * (rms.max(EPS)).log10();
+                            
+                            // Normalize: noise floor -55dB, max -10dB
+                            const NOISE_FLOOR_DB: f32 = -55.0;
+                            const MAX_DB: f32 = -10.0;
+                            let level = ((db - NOISE_FLOOR_DB) / (MAX_DB - NOISE_FLOOR_DB)).clamp(0.0, 1.0);
+                            
+                            // Apply gain (1.5x) for better sensitivity
+                            let level = (level * 1.5).min(1.0);
+                            
+                            // Smoothing: attack faster, release slower
+                            let prev = level_milli_thread.load(Ordering::Relaxed) as f32 / 1000.0;
+                            let smooth = if level > prev {
+                                // Attack: faster response to increases
+                                prev * 0.65 + level * 0.35
+                            } else {
+                                // Release: slower decay
+                                prev * 0.88 + level * 0.12
+                            };
+                            level_milli_thread.store((smooth * 1000.0) as u32, Ordering::Relaxed);
+                            
+                            // Debug log (once per ~500ms, only in debug builds)
+                            #[cfg(debug_assertions)]
+                            {
+                                use std::sync::atomic::AtomicU64;
+                                static COUNTER: AtomicU64 = AtomicU64::new(0);
+                                let c = COUNTER.fetch_add(1, Ordering::Relaxed);
+                                if c % 12500 == 0 { // ~500ms at 25kHz sample rate
+                                    eprintln!(
+                                        "[kiklet][audio] rms={:.4} db={:.1} level={:.3} smooth={:.3}",
+                                        rms, db, level, smooth
+                                    );
+                                }
                             }
                         }
                     },
@@ -244,6 +393,7 @@ impl RecordingSession {
                 created_at,
                 stop_tx,
                 join: Some(join),
+                level_milli,
             }),
             Ok(Err(e)) => Err(e),
             Err(_) => Err(AudioError::Io(std::io::Error::new(
