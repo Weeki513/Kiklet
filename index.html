@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Kiklet</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+
+  <body>
+    <main class="app">
+      <header class="topbar">
+        <div class="brand">
+          <div class="title">Kiklet</div>
+          <div class="subtitle">Tiny recorder</div>
+        </div>
+        <div class="status" id="status">Idle</div>
+      </header>
+
+      <section class="controls">
+        <button class="btn" id="btn-start" type="button">Start</button>
+        <button class="btn" id="btn-stop" type="button">Stop</button>
+        <button class="btn btn-secondary" id="btn-folder" type="button">Reveal Folder</button>
+      </section>
+
+      <section class="player">
+        <audio id="audio" controls preload="none"></audio>
+      </section>
+
+      <section class="list">
+        <div class="list-header">
+          <div>Recordings</div>
+          <div class="muted" id="count"></div>
+        </div>
+        <div id="items" class="items"></div>
+      </section>
+    </main>
+  </body>
+</html>
